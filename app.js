@@ -1,43 +1,152 @@
-// ── Storage (localStorage-backed) ─────────────────────────
+// ── Config / State ─────────────────────────────────────────
 
-const STORAGE_KEY = 'budget-tracker-data-v1';
+const SCRIPT_URL_KEY = 'budget-tracker-script-url';
 
-function loadStore() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { receipts: [], items: [] };
-    const data = JSON.parse(raw);
-    return {
-      receipts: Array.isArray(data.receipts) ? data.receipts : [],
-      items: Array.isArray(data.items) ? data.items : [],
-    };
-  } catch (e) {
-    console.error('Failed to load store:', e);
-    return { receipts: [], items: [] };
-  }
-}
-
-function saveStore(store) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
-}
-
-function uid() {
-  if (crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
-}
-
-// ── Module State ──────────────────────────────────────────
-
+let scriptUrl = localStorage.getItem(SCRIPT_URL_KEY) || '';
 let categories = CATEGORIES;
+let cache = null;           // { receipts, items } from last fetch
+let pendingFetch = null;    // dedupe concurrent reads
 let categoryChart = null;
 let groceryChart = null;
 let itemCounter = 0;
 
+// ── Boot ───────────────────────────────────────────────────
+
 document.addEventListener('DOMContentLoaded', () => {
-  initForm();
+  if (!scriptUrl) {
+    showSetup();
+  } else {
+    showApp();
+  }
 });
 
-// ── Navigation ────────────────────────────────────────────
+function showSetup() {
+  document.getElementById('setup-overlay').classList.remove('hidden');
+  document.getElementById('app-root').classList.add('hidden');
+  document.getElementById('setup-url').value = scriptUrl || '';
+  document.getElementById('setup-url').focus();
+}
+
+function showApp() {
+  document.getElementById('setup-overlay').classList.add('hidden');
+  document.getElementById('app-root').classList.remove('hidden');
+  document.getElementById('settings-url').textContent = scriptUrl;
+  initForm();
+}
+
+async function saveScriptUrl() {
+  const input = document.getElementById('setup-url');
+  const err = document.getElementById('setup-error');
+  const btn = document.getElementById('setup-save-btn');
+  const url = input.value.trim();
+
+  err.classList.add('hidden');
+
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(url)) {
+    err.textContent = 'That doesn\'t look like an Apps Script web app URL. It should end with /exec.';
+    err.classList.remove('hidden');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  try {
+    const res = await fetch(url, { method: 'GET' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (!Array.isArray(data.receipts)) throw new Error('Unexpected response shape');
+    scriptUrl = url;
+    localStorage.setItem(SCRIPT_URL_KEY, url);
+    cache = data;
+    showApp();
+  } catch (e) {
+    err.textContent = 'Could not reach the script: ' + e.message + '. Double-check the URL and that "Who has access" is set to "Anyone".';
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Connect';
+  }
+}
+
+function changeScriptUrl() {
+  showSetup();
+}
+
+// ── API Layer ──────────────────────────────────────────────
+
+function setSyncIndicator(state, text) {
+  const el = document.getElementById('sync-indicator');
+  if (!el) return;
+  el.className = 'sync-indicator ' + (state || '');
+  el.textContent = text || '';
+}
+
+async function apiGet() {
+  if (pendingFetch) return pendingFetch;
+  setSyncIndicator('loading', 'Syncing…');
+  pendingFetch = (async () => {
+    try {
+      const res = await fetch(scriptUrl, { method: 'GET' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      cache = {
+        receipts: data.receipts || [],
+        items: data.items || [],
+      };
+      setSyncIndicator('ok', 'Synced');
+      setTimeout(() => setSyncIndicator('', ''), 1500);
+      return cache;
+    } catch (e) {
+      setSyncIndicator('error', 'Sync error');
+      throw e;
+    } finally {
+      pendingFetch = null;
+    }
+  })();
+  return pendingFetch;
+}
+
+async function apiPost(body) {
+  setSyncIndicator('loading', 'Saving…');
+  try {
+    // text/plain body keeps this a CORS "simple" request and avoids preflight,
+    // which Apps Script web apps don't always handle smoothly.
+    const res = await fetch(scriptUrl, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    setSyncIndicator('ok', 'Saved');
+    setTimeout(() => setSyncIndicator('', ''), 1500);
+    return data;
+  } catch (e) {
+    setSyncIndicator('error', 'Save failed');
+    throw e;
+  }
+}
+
+async function getData(forceFresh) {
+  if (cache && !forceFresh) return cache;
+  return apiGet();
+}
+
+async function refreshData() {
+  try {
+    await apiGet();
+    const active = document.querySelector('.nav-btn.active')?.dataset.tab;
+    if (active === 'dashboard') loadDashboard();
+    if (active === 'receipts') loadReceipts();
+  } catch (e) {
+    alert('Could not refresh: ' + e.message);
+  }
+}
+
+// ── Navigation ─────────────────────────────────────────────
 
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.add('hidden'));
@@ -49,7 +158,12 @@ function showTab(name) {
   if (name === 'receipts') loadReceipts();
 }
 
-// ── Utilities ─────────────────────────────────────────────
+// ── Utilities ──────────────────────────────────────────────
+
+function uid() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
 
 function fmt(amount) {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
@@ -69,7 +183,7 @@ function makeCategorySelect(currentCat, onChange) {
   return sel;
 }
 
-// ── Form Init ─────────────────────────────────────────────
+// ── Form Init ──────────────────────────────────────────────
 
 function initForm() {
   document.getElementById('form-date').value = todayISO();
@@ -102,7 +216,7 @@ function getSelectedCategory() {
   return document.querySelector('.cat-pill.active')?.dataset.cat || 'other';
 }
 
-// ── Form Items ────────────────────────────────────────────
+// ── Form Items ─────────────────────────────────────────────
 
 function addFormItem() {
   const id = ++itemCounter;
@@ -164,9 +278,9 @@ function syncReceiptTotal() {
   }
 }
 
-// ── Form Submit ───────────────────────────────────────────
+// ── Form Submit ────────────────────────────────────────────
 
-function submitForm(e) {
+async function submitForm(e) {
   e.preventDefault();
 
   const storeInput = document.getElementById('form-store');
@@ -204,13 +318,13 @@ function submitForm(e) {
     category,
   };
 
-  const newItems = [];
+  const items = [];
   document.querySelectorAll('#form-items-body tr').forEach(tr => {
     const desc = tr.querySelector('.desc')?.value.trim() || '';
     const qty = parseFloat(tr.querySelector('.qty')?.value);
     const price = parseFloat(tr.querySelector('.price')?.value);
     if (desc || (qty > 0 && price > 0)) {
-      newItems.push({
+      items.push({
         id: uid(),
         receipt_id: receiptId,
         description: desc,
@@ -222,12 +336,23 @@ function submitForm(e) {
     }
   });
 
-  const store = loadStore();
-  store.receipts.push(receipt);
-  store.items.push(...newItems);
-  saveStore(store);
+  const btn = document.getElementById('form-submit');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
 
-  showSuccess(receipt);
+  try {
+    await apiPost({ action: 'add_receipt', receipt, items });
+    if (cache) {
+      cache.receipts.push(receipt);
+      cache.items.push(...items);
+    }
+    showSuccess(receipt);
+  } catch (err) {
+    showFormError('Save failed: ' + err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Receipt';
+  }
 }
 
 function showFormError(msg) {
@@ -262,12 +387,10 @@ function resetForm() {
   itemCounter = 0;
 }
 
-// ── Dashboard ─────────────────────────────────────────────
+// ── Dashboard ──────────────────────────────────────────────
 
-function computeDashboard() {
-  const { receipts } = loadStore();
+function computeDashboard(receipts) {
   const catIds = new Set(categories.map(c => c.id));
-
   const spendByCat = {};
   categories.forEach(c => { spendByCat[c.id] = 0; });
 
@@ -280,7 +403,7 @@ function computeDashboard() {
 
   const groceryReceipts = receipts
     .filter(r => r.category === 'groceries')
-    .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
 
   let running = 0;
   const groceryOverTime = [];
@@ -289,7 +412,7 @@ function computeDashboard() {
     if (!isNaN(amt)) {
       running += amt;
       groceryOverTime.push({
-        date: r.date,
+        date: String(r.date),
         store: r.store,
         amount: Math.round(amt * 100) / 100,
         running_total: Math.round(running * 100) / 100,
@@ -312,17 +435,23 @@ function computeDashboard() {
   };
 }
 
-function loadDashboard() {
-  const data = computeDashboard();
+async function loadDashboard() {
+  let data;
+  try {
+    data = await getData();
+  } catch (e) {
+    return;
+  }
+  const dash = computeDashboard(data.receipts);
 
-  document.getElementById('stat-total-spend').textContent = fmt(data.total_spend);
-  document.getElementById('stat-total-receipts').textContent = data.total_receipts;
-  document.getElementById('stat-grocery-total').textContent = fmt(data.grocery_total);
-  document.getElementById('stat-avg-grocery').textContent = fmt(data.avg_grocery_trip);
-  document.getElementById('stat-grocery-trips').textContent = data.grocery_trips;
+  document.getElementById('stat-total-spend').textContent = fmt(dash.total_spend);
+  document.getElementById('stat-total-receipts').textContent = dash.total_receipts;
+  document.getElementById('stat-grocery-total').textContent = fmt(dash.grocery_total);
+  document.getElementById('stat-avg-grocery').textContent = fmt(dash.avg_grocery_trip);
+  document.getElementById('stat-grocery-trips').textContent = dash.grocery_trips;
 
-  renderCategoryChart(data.spend_by_category);
-  renderGroceryChart(data.grocery_over_time);
+  renderCategoryChart(dash.spend_by_category);
+  renderGroceryChart(dash.grocery_over_time);
 }
 
 function renderCategoryChart(spendByCategory) {
@@ -417,11 +546,21 @@ function renderGroceryChart(groceryOverTime) {
   });
 }
 
-// ── Receipts ──────────────────────────────────────────────
+// ── Receipts ───────────────────────────────────────────────
 
-function loadReceipts() {
-  const { receipts } = loadStore();
+async function loadReceipts() {
   const container = document.getElementById('receipts-container');
+  container.innerHTML = '<p class="empty-state">Loading…</p>';
+
+  let data;
+  try {
+    data = await getData();
+  } catch (e) {
+    container.innerHTML = `<p class="empty-state error">Could not load: ${e.message}</p>`;
+    return;
+  }
+
+  const receipts = data.receipts;
   container.innerHTML = '';
 
   if (receipts.length === 0) {
@@ -429,7 +568,9 @@ function loadReceipts() {
     return;
   }
 
-  const sorted = [...receipts].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  const sorted = [...receipts].sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || ''))
+  );
 
   const wrapper = document.createElement('div');
   wrapper.className = 'receipts-wrapper';
@@ -490,18 +631,28 @@ function loadReceipts() {
   });
 }
 
-function updateReceiptCategory(receiptId, category) {
-  const store = loadStore();
-  const r = store.receipts.find(r => r.id === receiptId);
-  if (r) r.category = category;
-  saveStore(store);
+async function updateReceiptCategory(receiptId, category) {
+  try {
+    await apiPost({ action: 'update_receipt', id: receiptId, category });
+    if (cache) {
+      const r = cache.receipts.find(r => r.id === receiptId);
+      if (r) r.category = category;
+    }
+  } catch (e) {
+    alert('Update failed: ' + e.message);
+  }
 }
 
-function updateItemCategory(itemId, category) {
-  const store = loadStore();
-  const it = store.items.find(i => i.id === itemId);
-  if (it) it.category = category;
-  saveStore(store);
+async function updateItemCategory(itemId, category) {
+  try {
+    await apiPost({ action: 'update_item', id: itemId, category });
+    if (cache) {
+      const it = cache.items.find(i => i.id === itemId);
+      if (it) it.category = category;
+    }
+  } catch (e) {
+    alert('Update failed: ' + e.message);
+  }
 }
 
 function toggleItems(btn, receiptId, parentRow) {
@@ -512,8 +663,7 @@ function toggleItems(btn, receiptId, parentRow) {
     return;
   }
 
-  const { items } = loadStore();
-  const receiptItems = items.filter(i => i.receipt_id === receiptId);
+  const receiptItems = (cache?.items || []).filter(i => i.receipt_id === receiptId);
   btn.textContent = 'Hide';
 
   const itemsRow = document.createElement('tr');
@@ -565,65 +715,34 @@ function toggleItems(btn, receiptId, parentRow) {
   parentRow.insertAdjacentElement('afterend', itemsRow);
 }
 
-function deleteReceipt(receiptId, row) {
+async function deleteReceipt(receiptId, row) {
   if (!confirm('Delete this receipt?')) return;
-  const store = loadStore();
-  store.receipts = store.receipts.filter(r => r.id !== receiptId);
-  store.items = store.items.filter(i => i.receipt_id !== receiptId);
-  saveStore(store);
-  document.getElementById(`items-row-${receiptId}`)?.remove();
-  row.remove();
-  if (!store.receipts.length) {
-    document.getElementById('receipts-container').innerHTML =
-      '<p class="empty-state">No receipts yet. Add one to get started.</p>';
+  try {
+    await apiPost({ action: 'delete_receipt', id: receiptId });
+    if (cache) {
+      cache.receipts = cache.receipts.filter(r => r.id !== receiptId);
+      cache.items = cache.items.filter(i => i.receipt_id !== receiptId);
+    }
+    document.getElementById(`items-row-${receiptId}`)?.remove();
+    row.remove();
+    if (cache && cache.receipts.length === 0) {
+      document.getElementById('receipts-container').innerHTML =
+        '<p class="empty-state">No receipts yet. Add one to get started.</p>';
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
   }
 }
 
-// ── Data Import / Export ──────────────────────────────────
-
-function exportData() {
-  const store = loadStore();
-  const blob = new Blob([JSON.stringify(store, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `budget-tracker-${todayISO()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showDataStatus(`Exported ${store.receipts.length} receipts.`);
-}
-
-function importData(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const parsed = JSON.parse(e.target.result);
-      if (!parsed.receipts || !Array.isArray(parsed.receipts)) {
-        showDataStatus('Invalid file: missing "receipts" array.', true);
-        return;
-      }
-      const items = Array.isArray(parsed.items) ? parsed.items : [];
-      if (!confirm(`Import ${parsed.receipts.length} receipts and ${items.length} items? This replaces current data.`)) {
-        return;
-      }
-      saveStore({ receipts: parsed.receipts, items });
-      showDataStatus(`Imported ${parsed.receipts.length} receipts.`);
-    } catch (err) {
-      showDataStatus('Could not parse JSON file.', true);
-    }
-  };
-  reader.readAsText(file);
-  event.target.value = '';
-}
-
-function clearAllData() {
-  if (!confirm('Permanently delete ALL receipts and items? This cannot be undone.')) return;
-  localStorage.removeItem(STORAGE_KEY);
-  showDataStatus('All data cleared.');
+async function confirmClearAll() {
+  if (!confirm('Permanently delete ALL receipts and items from your Google Sheet? This cannot be undone.')) return;
+  try {
+    await apiPost({ action: 'clear' });
+    cache = { receipts: [], items: [] };
+    showDataStatus('All data cleared.');
+  } catch (e) {
+    showDataStatus('Clear failed: ' + e.message, true);
+  }
 }
 
 function showDataStatus(msg, isError) {
