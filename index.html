@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Budget Tracker</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+<div class="layout">
+
+  <nav class="sidebar">
+    <div class="sidebar-logo">Budget Tracker</div>
+    <ul class="nav-list">
+      <li><button class="nav-btn active" data-tab="add" onclick="showTab('add')">Add Receipt</button></li>
+      <li><button class="nav-btn" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button></li>
+      <li><button class="nav-btn" data-tab="receipts" onclick="showTab('receipts')">Receipts</button></li>
+      <li><button class="nav-btn" data-tab="data" onclick="showTab('data')">Data</button></li>
+    </ul>
+  </nav>
+
+  <main class="main">
+
+    <!-- Add Receipt Tab -->
+    <section id="tab-add" class="tab">
+      <h2>Add Receipt</h2>
+
+      <div id="add-form-wrapper">
+        <form id="receipt-form" class="receipt-form" onsubmit="submitForm(event)" novalidate>
+
+          <div class="form-row">
+            <div class="form-field grow">
+              <label for="form-store">Store / Merchant</label>
+              <input id="form-store" type="text" placeholder="e.g. Trader Joe's" autocomplete="off" required>
+            </div>
+            <div class="form-field">
+              <label for="form-date">Date</label>
+              <input id="form-date" type="date" required>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label>Category</label>
+            <div id="category-pills" class="cat-pills"></div>
+          </div>
+
+          <div class="form-section">
+            <div class="section-header">
+              <span class="section-title">Items <span class="optional-tag">optional</span></span>
+              <button type="button" class="btn-add-item" onclick="addFormItem()">+ Add Item</button>
+            </div>
+            <div id="items-area">
+              <p id="no-items-hint" class="no-items-hint">No items yet — or skip this and just enter the total below.</p>
+              <table class="form-items-table hidden" id="form-items-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Qty</th>
+                    <th>Unit Price</th>
+                    <th>Total</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="form-items-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="total-row">
+            <label for="form-total" class="total-label">Receipt Total</label>
+            <div class="total-input-wrap">
+              <span class="total-dollar">$</span>
+              <input id="form-total" type="number" placeholder="0.00" step="0.01" min="0" required>
+            </div>
+            <p id="form-error" class="form-error hidden"></p>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" id="form-submit" class="btn-save">Save Receipt</button>
+          </div>
+
+        </form>
+      </div>
+
+      <div id="save-success" class="success-state hidden">
+        <div class="success-card">
+          <div class="success-check">&#10003;</div>
+          <h3 id="success-store"></h3>
+          <p id="success-detail"></p>
+          <button class="btn-save" onclick="showAddForm()">Add Another Receipt</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dashboard Tab -->
+    <section id="tab-dashboard" class="tab hidden">
+      <h2>Dashboard</h2>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-total-spend">$0.00</div>
+          <div class="stat-label">Total Spend</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-total-receipts">0</div>
+          <div class="stat-label">Receipts</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-grocery-total">$0.00</div>
+          <div class="stat-label">Total Grocery</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-avg-grocery">$0.00</div>
+          <div class="stat-label">Avg Grocery Trip</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-grocery-trips">0</div>
+          <div class="stat-label">Grocery Trips</div>
+        </div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="chart-card">
+          <h3>Spending by Category</h3>
+          <div class="chart-container">
+            <canvas id="chart-category"></canvas>
+          </div>
+          <p class="chart-empty hidden" id="chart-category-empty">No spending data yet.</p>
+        </div>
+        <div class="chart-card">
+          <h3>Grocery Spend Over Time</h3>
+          <div class="chart-container">
+            <canvas id="chart-grocery"></canvas>
+          </div>
+          <p class="chart-empty hidden" id="chart-grocery-empty">No grocery receipts yet.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Receipts Tab -->
+    <section id="tab-receipts" class="tab hidden">
+      <h2>Receipts</h2>
+      <div id="receipts-container">
+        <p class="empty-state">No receipts yet. Add one to get started.</p>
+      </div>
+    </section>
+
+    <!-- Data Tab -->
+    <section id="tab-data" class="tab hidden">
+      <h2>Data</h2>
+      <div class="data-card">
+        <p class="data-note">Your receipts are stored in this browser's local storage. Use these tools to back up or move your data.</p>
+        <div class="data-actions">
+          <button class="btn-data" onclick="exportData()">Export JSON</button>
+          <label class="btn-data" for="import-file">Import JSON</label>
+          <input type="file" id="import-file" accept="application/json" class="hidden" onchange="importData(event)">
+          <button class="btn-data danger" onclick="clearAllData()">Clear All Data</button>
+        </div>
+        <p id="data-status" class="data-status hidden"></p>
+      </div>
+    </section>
+
+  </main>
+</div>
+<script src="categories.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
