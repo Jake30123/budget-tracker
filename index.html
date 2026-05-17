@@ -1,252 +1,231 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Budget Tracker</title>
-  <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
-<!-- Setup overlay: shown when no script URL is configured -->
-<div id="setup-overlay" class="setup-overlay hidden">
-  <div class="setup-card">
-    <h1>Set up Google Sheets sync</h1>
-    <p class="setup-intro">Budget Tracker stores your receipts in your own Google Sheet. Follow these steps once:</p>
-    <ol class="setup-steps">
-      <li><a href="https://sheets.new" target="_blank" rel="noopener">Create a new Google Sheet</a>.</li>
-      <li>In that sheet, open <strong>Extensions → Apps Script</strong>.</li>
-      <li>Replace the default code with the script from
-        <a href="https://github.com/Jake30123/budget-tracker/blob/main/apps-script/Code.gs" target="_blank" rel="noopener">Code.gs in the repo</a>,
-        then click the save (disk) icon.</li>
-      <li>Click <strong>Deploy → New deployment</strong>. Choose type <strong>Web app</strong>. Set
-        "Execute as: <strong>Me</strong>" and "Who has access: <strong>Anyone</strong>". Click Deploy
-        and authorize when prompted.</li>
-      <li>Copy the <strong>Web app URL</strong> (it ends in <code>/exec</code>) and paste it below.</li>
-    </ol>
-    <label for="setup-url" class="setup-label">Web app URL</label>
-    <input id="setup-url" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
-    <p id="setup-error" class="setup-error hidden"></p>
-    <div class="setup-actions">
-      <button id="setup-save-btn" class="btn-save" onclick="saveScriptUrl()">Connect</button>
+<!-- First-run Google Sheets setup -->
+<div id="setup-overlay" class="setup hidden">
+  <h1>Welcome.</h1>
+  <p class="lede">
+    A budget tracker that answers one question first: <em>am I OK this month?</em>
+    Connect your Google Sheet to begin — your data stays in your sheet.
+  </p>
+  <div class="setup-step">
+    <div class="n">1</div>
+    <div>
+      <div class="t"><a href="https://sheets.new" target="_blank" rel="noopener">Create a new Google Sheet</a></div>
+      <div class="d">Or use an existing one — Budget Tracker will add its own tabs.</div>
     </div>
+  </div>
+  <div class="setup-step">
+    <div class="n">2</div>
+    <div>
+      <div class="t">Open Extensions → Apps Script and paste in
+        <a href="https://github.com/Jake30123/budget-tracker/blob/main/apps-script/Code.gs" target="_blank" rel="noopener">Code.gs</a></div>
+      <div class="d">Save the script.</div>
+    </div>
+  </div>
+  <div class="setup-step">
+    <div class="n">3</div>
+    <div>
+      <div class="t">Deploy as a Web app</div>
+      <div class="d">Deploy → New deployment → Type "Web app". Set "Execute as: Me" and "Who has access: Anyone".</div>
+    </div>
+  </div>
+  <div class="setup-step">
+    <div class="n">4</div>
+    <div style="flex:1">
+      <div class="t">Paste the Web app URL below</div>
+      <input id="setup-url" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off" />
+      <p id="setup-error" class="setup-error hidden"></p>
+    </div>
+  </div>
+  <div class="setup-foot">
+    <span class="setup-note">Press <span class="mono">N</span> after connecting to add a transaction.</span>
+    <button id="setup-save-btn" class="btn btn-primary" onclick="saveScriptUrl()">Connect</button>
   </div>
 </div>
 
 <!-- Main app -->
-<div id="app-root" class="layout hidden">
+<div id="app-root" class="app hidden">
 
-  <nav class="sidebar">
-    <div class="sidebar-logo">Budget Tracker</div>
-    <ul class="nav-list">
-      <li><button class="nav-btn active" data-tab="add" onclick="showTab('add')">Add Receipt</button></li>
-      <li><button class="nav-btn" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button></li>
-      <li><button class="nav-btn" data-tab="receipts" onclick="showTab('receipts')">Receipts</button></li>
-      <li><button class="nav-btn" data-tab="budgets" onclick="showTab('budgets')">Budgets</button></li>
-      <li><button class="nav-btn" data-tab="settings" onclick="showTab('settings')">Settings</button></li>
-    </ul>
-    <div class="sync-indicator" id="sync-indicator"></div>
-  </nav>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">b</span>
+      <span class="brand-name">budget</span>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-footer">
+      <div class="month" id="sidebar-month"></div>
+      <div id="sidebar-day"></div>
+      <div style="margin-top:12px;opacity:0.85">
+        Press <span class="mono">N</span> to add anywhere
+      </div>
+      <div class="sync-indicator" id="sync-indicator"></div>
+    </div>
+  </aside>
 
   <main class="main">
 
-    <!-- Add Receipt Tab -->
-    <section id="tab-add" class="tab">
-      <h2>Add Receipt</h2>
-
-      <div id="add-form-wrapper">
-        <form id="receipt-form" class="receipt-form" onsubmit="submitForm(event)" novalidate>
-
-          <div class="form-row">
-            <div class="form-field grow">
-              <label for="form-store">Store / Merchant</label>
-              <input id="form-store" type="text" placeholder="e.g. Trader Joe's" autocomplete="off" required>
-            </div>
-            <div class="form-field">
-              <label for="form-date">Date</label>
-              <input id="form-date" type="date" required>
-            </div>
-          </div>
-
-          <div class="form-field">
-            <label>Category</label>
-            <div id="category-pills" class="cat-pills"></div>
-          </div>
-
-          <div class="form-section">
-            <div class="section-header">
-              <span class="section-title">Items <span class="optional-tag">optional</span></span>
-            </div>
-            <div id="items-area">
-              <p id="no-items-hint" class="no-items-hint">No items yet — or skip this and just enter the total below.</p>
-              <table class="form-items-table hidden" id="form-items-table">
-                <thead>
-                  <tr>
-                    <th>Description</th>
-                    <th>Qty</th>
-                    <th>Unit Price</th>
-                    <th>Total</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody id="form-items-body"></tbody>
-              </table>
-              <div class="items-add-row">
-                <button type="button" class="btn-add-item" onclick="addFormItem()">+ Add Item</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="total-row">
-            <label for="form-total" class="total-label">Receipt Total</label>
-            <div class="total-input-wrap">
-              <span class="total-dollar">$</span>
-              <input id="form-total" type="number" placeholder="0.00" step="0.01" min="0" required>
-            </div>
-            <p id="form-error" class="form-error hidden"></p>
-          </div>
-
-          <div class="form-actions">
-            <button type="submit" id="form-submit" class="btn-save">Save Receipt</button>
-          </div>
-
-        </form>
-      </div>
-
-      <div id="save-success" class="success-state hidden">
-        <div class="success-card">
-          <div class="success-check">&#10003;</div>
-          <h3 id="success-store"></h3>
-          <p id="success-detail"></p>
-          <button class="btn-save" onclick="showAddForm()">Add Another Receipt</button>
+    <!-- Overview / Dashboard -->
+    <section id="tab-dashboard" class="tab">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Overview</h1>
+          <div class="page-sub" id="dash-sub"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="showBudgetEditor()">Budgets</button>
+          <button class="btn" onclick="openReceiptModal()">+ With items</button>
+          <button class="btn btn-primary" onclick="focusQuickAdd()">+ Add transaction</button>
         </div>
       </div>
+
+      <div class="quickbar" role="group" aria-label="Quick add">
+        <span class="quickbar-prompt">Add</span>
+        <input id="quickbar-input" placeholder="$12 coffee · Trader Joe's 87.40 yesterday · 45 gas" spellcheck="false" autocomplete="off" />
+        <div class="quickbar-chips" id="quickbar-chips"></div>
+        <div class="quickbar-actions">
+          <span class="quickbar-kbd">↵<kbd>Enter</kbd></span>
+          <button class="btn btn-primary btn-sm" id="quickbar-add-btn" disabled onclick="commitQuickAdd()">Add</button>
+        </div>
+      </div>
+
+      <section class="hero">
+        <div class="hero-card">
+          <div class="eyebrow"><span id="hero-month-label"></span> so far</div>
+          <div class="hero-num" id="hero-num"></div>
+          <div class="pace">
+            <div class="pace-track">
+              <div class="pace-spent" id="pace-spent"></div>
+              <div class="pace-marker" id="pace-marker"></div>
+            </div>
+            <div class="pace-labels">
+              <span id="pace-spent-label"></span>
+              <span id="pace-status" class="pace-status"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-card allowance">
+          <div class="eyebrow">Daily allowance</div>
+          <div class="allowance-row">
+            <div>
+              <div class="lbl" id="allowance-days-label"></div>
+              <div class="val" id="allowance-amount"></div>
+            </div>
+          </div>
+          <div class="split"></div>
+          <div class="allowance-row">
+            <div>
+              <div class="lbl">Remaining this month</div>
+              <div class="val small" id="allowance-remaining"></div>
+            </div>
+            <div style="text-align:right">
+              <div class="lbl">Projected total</div>
+              <div class="val small" id="allowance-projection"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="section-h">
+        <h2>Categories</h2>
+        <span class="meta">PACE MARKER = WHERE YOU SHOULD BE TODAY</span>
+      </div>
+      <div class="cat-grid" id="cat-grid"></div>
+
+      <div class="section-h">
+        <h2>This month, day by day</h2>
+        <span class="meta">DARKER = MORE SPEND</span>
+      </div>
+      <div class="hero-card" id="heatmap-card" style="max-width:620px"></div>
+
+      <div class="section-h">
+        <h2>Recent</h2>
+        <span class="meta" id="recent-meta"></span>
+      </div>
+      <div id="recent-list"></div>
     </section>
 
-    <!-- Dashboard Tab -->
-    <section id="tab-dashboard" class="tab hidden">
-      <div class="tab-header">
-        <h2>Dashboard</h2>
-        <button class="btn-refresh" onclick="refreshData()" title="Refresh from sheet">↻</button>
+    <!-- Transactions -->
+    <section id="tab-transactions" class="tab hidden">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Transactions</h1>
+          <div class="page-sub" id="txn-sub"></div>
+        </div>
+        <button class="btn btn-primary" onclick="openReceiptModal()">+ New</button>
       </div>
-
-      <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-value" id="stat-total-spend">$0.00</div>
-          <div class="stat-label">Total Spend</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-total-receipts">0</div>
-          <div class="stat-label">Receipts</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-grocery-total">$0.00</div>
-          <div class="stat-label">Total Grocery</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-avg-grocery">$0.00</div>
-          <div class="stat-label">Avg Grocery Trip</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-grocery-trips">0</div>
-          <div class="stat-label">Grocery Trips</div>
-        </div>
-      </div>
-
-      <div class="budget-card" id="dashboard-budgets">
-        <div class="budget-card-header">
-          <h3 id="budget-card-title">Budgets — this month</h3>
-          <span class="budget-card-sub" id="budget-card-sub"></span>
-        </div>
-        <div id="budget-progress-list"></div>
-        <p class="budget-empty hidden" id="budget-empty">
-          No budgets set yet. <a href="#" onclick="showTab('budgets'); return false;">Set one up →</a>
-        </p>
-      </div>
-
-      <div class="charts-grid">
-        <div class="chart-card">
-          <h3>Spending by Category</h3>
-          <div class="chart-container">
-            <canvas id="chart-category"></canvas>
-          </div>
-          <p class="chart-empty hidden" id="chart-category-empty">No spending data yet.</p>
-        </div>
-        <div class="chart-card">
-          <h3>Grocery Spend Over Time</h3>
-          <div class="chart-container">
-            <canvas id="chart-grocery"></canvas>
-          </div>
-          <p class="chart-empty hidden" id="chart-grocery-empty">No grocery receipts yet.</p>
-        </div>
-      </div>
+      <div id="transactions-list"></div>
     </section>
 
-    <!-- Receipts Tab -->
-    <section id="tab-receipts" class="tab hidden">
-      <div class="tab-header">
-        <h2>Receipts</h2>
-        <button class="btn-refresh" onclick="refreshData()" title="Refresh from sheet">↻</button>
-      </div>
-      <div id="receipts-container">
-        <p class="empty-state">No receipts yet. Add one to get started.</p>
-      </div>
-    </section>
-
-    <!-- Budgets Tab -->
+    <!-- Budgets -->
     <section id="tab-budgets" class="tab hidden">
-      <div class="tab-header">
-        <h2>Budgets</h2>
-        <button class="btn-refresh" onclick="refreshData()" title="Refresh from sheet">↻</button>
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Budgets</h1>
+          <div class="page-sub">Edit your monthly targets. Pace mark shows where you should be today.</div>
+        </div>
       </div>
+      <div id="budgets-list"></div>
 
-      <div class="budget-card">
-        <h3 class="settings-h3">Monthly budget by category</h3>
-        <p class="data-note">Set a monthly target for each category. Leave blank or zero to remove the budget.</p>
-        <div id="budgets-list"></div>
-      </div>
-
-      <div class="budget-card">
-        <h3 class="settings-h3">Categories</h3>
-        <p class="data-note">Add your own categories. Built-in categories can't be removed; custom ones can.</p>
+      <div class="section-h"><h2>Categories</h2><span class="meta">CUSTOM CATEGORIES</span></div>
+      <div class="hero-card">
         <div id="categories-list"></div>
-        <form class="add-category-form" onsubmit="submitAddCategory(event)">
-          <div class="form-row">
-            <div class="form-field grow">
-              <label for="new-cat-name">New category</label>
-              <input id="new-cat-name" type="text" placeholder="e.g. Subscriptions" autocomplete="off" required>
-            </div>
-            <div class="form-field">
-              <label>Color</label>
-              <div id="new-cat-color-picker" class="color-picker"></div>
-            </div>
+        <form class="add-category-form" onsubmit="submitAddCategory(event)" style="margin-top:18px;padding-top:18px;border-top:1px solid var(--hairline-soft)">
+          <div class="field">
+            <label>New category</label>
+            <input id="new-cat-name" type="text" placeholder="e.g. Subscriptions" autocomplete="off" required />
           </div>
-          <p id="new-cat-error" class="form-error hidden"></p>
-          <div class="form-actions">
-            <button type="submit" class="btn-save" id="new-cat-submit">Add Category</button>
+          <div class="field" style="margin-top:14px">
+            <label>Color</label>
+            <div id="new-cat-color-picker" class="color-picker"></div>
+          </div>
+          <p id="new-cat-error" class="setup-error hidden"></p>
+          <div style="margin-top:14px">
+            <button type="submit" class="btn btn-primary" id="new-cat-submit">Add Category</button>
           </div>
         </form>
       </div>
     </section>
 
-    <!-- Settings Tab -->
+    <!-- Settings -->
     <section id="tab-settings" class="tab hidden">
-      <h2>Settings</h2>
-      <div class="data-card">
-        <h3 class="settings-h3">Google Sheets sync</h3>
-        <p class="data-note">Your data lives in the Google Sheet at this URL:</p>
-        <p class="script-url" id="settings-url"></p>
-        <div class="data-actions">
-          <button class="btn-data" onclick="changeScriptUrl()">Change URL</button>
-          <button class="btn-data danger" onclick="confirmClearAll()">Clear All Data</button>
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Settings</h1>
+          <div class="page-sub">Your data lives in your Google Sheet.</div>
         </div>
-        <p id="data-status" class="data-status hidden"></p>
+      </div>
+      <div class="hero-card" style="max-width:680px">
+        <div class="eyebrow">Google Sheets sync</div>
+        <div style="color:var(--ink-2);line-height:1.6;font-size:14px">
+          Connected to:<br />
+          <span class="mono" id="settings-url" style="font-size:12px;word-break:break-all;color:var(--ink-3)"></span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn" onclick="changeScriptUrl()">Change URL</button>
+          <button class="btn btn-danger" onclick="confirmClearAll()">Clear All Data</button>
+        </div>
+        <p id="data-status" class="setup-error hidden"></p>
       </div>
     </section>
 
   </main>
 </div>
+
+<!-- Modal & toast roots (populated at runtime) -->
+<div id="modal-root"></div>
+<div id="toast-root"></div>
 
 <script src="categories.js"></script>
 <script src="app.js"></script>

@@ -4,17 +4,17 @@ const SCRIPT_URL_KEY = 'budget-tracker-script-url';
 
 let scriptUrl = localStorage.getItem(SCRIPT_URL_KEY) || '';
 let categories = CATEGORIES.slice();
-let cache = null;           // { receipts, items, budgets, categories } from last fetch
-let pendingFetch = null;    // dedupe concurrent reads
-let categoryChart = null;
-let groceryChart = null;
-let itemCounter = 0;
+let cache = null;
+let pendingFetch = null;
+let currentPage = 'dashboard';
+let toastTimer = null;
 
 const CATEGORY_COLOR_PALETTE = [
-  '#22c55e', '#f97316', '#3b82f6', '#8b5cf6', '#ec4899',
-  '#f59e0b', '#14b8a6', '#ef4444', '#0ea5e9', '#a855f7',
-  '#84cc16', '#eab308', '#06b6d4', '#d946ef', '#6b7280',
+  '#3b6e4a', '#c47a3e', '#3d5b8a', '#7a5a8e', '#b04f74',
+  '#a07026', '#7a786e', '#4f7a6a', '#8a6f3e', '#5e5b8a',
 ];
+
+// ── Categories model ───────────────────────────────────────
 
 function rebuildCategories() {
   const custom = (cache && cache.categories) ? cache.categories : [];
@@ -28,11 +28,15 @@ function rebuildCategories() {
   custom.forEach(c => {
     if (!c || !c.id || seen.has(c.id)) return;
     seen.add(c.id);
-    merged.push({ id: c.id, name: c.name, color: c.color || '#6b7280', keywords: [] });
+    merged.push({ id: c.id, name: c.name, color: c.color || '#7a786e', keywords: [] });
   });
   const other = CATEGORIES.find(c => c.id === 'other');
   if (other) merged.push(other);
   categories = merged;
+}
+
+function categoryById(id) {
+  return categories.find(c => c.id === id) || categories[categories.length - 1];
 }
 
 function getBudgetMap() {
@@ -44,28 +48,178 @@ function getBudgetMap() {
   return map;
 }
 
+// ── Utility ────────────────────────────────────────────────
+
+function uid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function fmt(amount, opts) {
+  opts = opts || {};
+  if (amount == null || isNaN(amount)) return '—';
+  const abs = Math.abs(amount);
+  const sign = amount < 0 ? '-' : '';
+  const v = new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: opts.whole ? 0 : 2,
+    minimumFractionDigits: opts.whole ? 0 : 2,
+  }).format(abs);
+  return sign + v;
+}
+
+function fmtParts(amount) {
+  if (amount == null || isNaN(amount)) return { sign: '', whole: '—', cents: '' };
+  const fixed = Math.abs(amount).toFixed(2);
+  const [whole, cents] = fixed.split('.');
+  const withCommas = new Intl.NumberFormat('en-US').format(parseInt(whole, 10));
+  return { sign: amount < 0 ? '-' : '', whole: withCommas, cents };
+}
+
+function formatISO(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function todayISO() { return formatISO(new Date()); }
+
+function monthRange(date) {
+  const dt = date || new Date();
+  const y = dt.getFullYear();
+  const m = dt.getMonth();
+  return {
+    year: y,
+    monthIdx: m,
+    monthName: dt.toLocaleString('en-US', { month: 'long' }),
+    monthShort: dt.toLocaleString('en-US', { month: 'short' }),
+    today: dt.getDate(),
+    total: new Date(y, m + 1, 0).getDate(),
+  };
+}
+
+function pacePercent(range) {
+  return range.today / range.total;
+}
+
+function isThisMonth(dateStr, range) {
+  if (!dateStr) return false;
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.getFullYear() === range.year && d.getMonth() === range.monthIdx;
+}
+
+// ── Smart-parse for the quickbar ───────────────────────────
+
+function parseQuickInput(text, today) {
+  const ref = today || new Date();
+  const original = (text || '').trim();
+  if (!original) return null;
+
+  let s = original;
+  let amount = null;
+  const dollarMatch = s.match(/\$\s*(\d+(?:\.\d{1,2})?)/);
+  if (dollarMatch) {
+    amount = parseFloat(dollarMatch[1]);
+    s = (s.slice(0, dollarMatch.index) + s.slice(dollarMatch.index + dollarMatch[0].length)).replace(/\s+/g, ' ').trim();
+  } else {
+    const numMatch = s.match(/(?:^|\s)(\d+(?:\.\d{1,2})?)(?=\s|$)/);
+    if (numMatch) {
+      amount = parseFloat(numMatch[1]);
+      s = (s.slice(0, numMatch.index) + s.slice(numMatch.index + numMatch[0].length)).replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  let date = formatISO(ref);
+  let dateLabel = 'today';
+  const lower = ' ' + s.toLowerCase() + ' ';
+  if (/\byesterday\b/.test(lower)) {
+    const d = new Date(ref); d.setDate(d.getDate() - 1);
+    date = formatISO(d); dateLabel = 'yesterday';
+    s = s.replace(/\byesterday\b/i, '').replace(/\s+/g, ' ').trim();
+  } else if (/\btoday\b/.test(lower)) {
+    s = s.replace(/\btoday\b/i, '').replace(/\s+/g, ' ').trim();
+  } else {
+    const m = s.match(/(\d+)\s+days?\s+ago/i);
+    if (m) {
+      const d = new Date(ref); d.setDate(d.getDate() - parseInt(m[1], 10));
+      date = formatISO(d);
+      dateLabel = `${m[1]} day${m[1] === '1' ? '' : 's'} ago`;
+      s = s.replace(m[0], '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  const cleaned = s.replace(/^(at|for|on|@)\s+/i, '').replace(/\s+(for|at|on)\s+$/i, '').trim();
+  const store = cleaned;
+
+  const lc = (store || '').toLowerCase();
+  let category = 'other';
+  for (const c of categories) {
+    if (c.keywords && c.keywords.some(k => lc.includes(k))) { category = c.id; break; }
+  }
+  if (category === 'other') {
+    if (/\b(coffee|latte|espresso)\b/i.test(lc)) category = 'dining';
+    else if (/\b(lunch|dinner|breakfast|takeout|takeaway)\b/i.test(lc)) category = 'dining';
+    else if (/\b(gas|fuel|fill[\s-]?up)\b/i.test(lc)) category = 'gas';
+    else if (/\b(groceries|grocery)\b/i.test(lc)) category = 'groceries';
+  }
+
+  return { raw: original, amount, store: store || '', date, dateLabel, category };
+}
+
 // ── Boot ───────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
+  buildNav();
+  bindGlobalHotkeys();
+  bindQuickbar();
   if (!scriptUrl) {
     showSetup();
   } else {
     showApp();
+    refreshData();
   }
 });
+
+function buildNav() {
+  const nav = document.getElementById('nav');
+  const items = [
+    { id: 'dashboard',    label: 'Overview',     kbd: '1' },
+    { id: 'transactions', label: 'Transactions', kbd: '2' },
+    { id: 'budgets',      label: 'Budgets',      kbd: '3' },
+    { id: 'settings',     label: 'Settings',     kbd: '4' },
+  ];
+  nav.innerHTML = '';
+  items.forEach(it => {
+    const btn = document.createElement('button');
+    btn.className = 'nav-item' + (it.id === currentPage ? ' active' : '');
+    btn.dataset.tab = it.id;
+    btn.innerHTML = `<span>${it.label}</span><span class="nav-shortcut">${it.kbd}</span>`;
+    btn.addEventListener('click', () => showTab(it.id));
+    nav.appendChild(btn);
+  });
+}
 
 function showSetup() {
   document.getElementById('setup-overlay').classList.remove('hidden');
   document.getElementById('app-root').classList.add('hidden');
   document.getElementById('setup-url').value = scriptUrl || '';
-  document.getElementById('setup-url').focus();
+  setTimeout(() => document.getElementById('setup-url').focus(), 0);
 }
 
 function showApp() {
   document.getElementById('setup-overlay').classList.add('hidden');
   document.getElementById('app-root').classList.remove('hidden');
   document.getElementById('settings-url').textContent = scriptUrl;
-  initForm();
+  updateSidebarMonth();
+  renderDashboard();
+}
+
+function updateSidebarMonth() {
+  const r = monthRange();
+  document.getElementById('sidebar-month').textContent = `${r.monthName} ${r.year}`;
+  document.getElementById('sidebar-day').textContent = `Day ${r.today} of ${r.total}`;
 }
 
 async function saveScriptUrl() {
@@ -113,7 +267,7 @@ function changeScriptUrl() {
   showSetup();
 }
 
-// ── API Layer ──────────────────────────────────────────────
+// ── API layer ──────────────────────────────────────────────
 
 function setSyncIndicator(state, text) {
   const el = document.getElementById('sync-indicator');
@@ -154,8 +308,6 @@ async function apiGet() {
 async function apiPost(body) {
   setSyncIndicator('loading', 'Saving…');
   try {
-    // text/plain body keeps this a CORS "simple" request and avoids preflight,
-    // which Apps Script web apps don't always handle smoothly.
     const res = await fetch(scriptUrl, {
       method: 'POST',
       body: JSON.stringify(body),
@@ -181,437 +333,519 @@ async function getData(forceFresh) {
 async function refreshData() {
   try {
     await apiGet();
-    const active = document.querySelector('.nav-btn.active')?.dataset.tab;
-    if (active === 'dashboard') loadDashboard();
-    if (active === 'receipts') loadReceipts();
-    if (active === 'budgets') loadBudgets();
-    if (active === 'add') buildCategoryPills();
+    renderCurrent();
   } catch (e) {
-    alert('Could not refresh: ' + e.message);
+    showToast('Could not load: ' + e.message, { error: true });
   }
 }
 
-// ── Navigation ─────────────────────────────────────────────
+// ── Tab navigation ─────────────────────────────────────────
 
 function showTab(name) {
+  currentPage = name;
   document.querySelectorAll('.tab').forEach(t => t.classList.add('hidden'));
-  document.getElementById(`tab-${name}`).classList.remove('hidden');
-  document.querySelectorAll('.nav-btn').forEach(b => {
+  const tab = document.getElementById(`tab-${name}`);
+  if (tab) tab.classList.remove('hidden');
+  document.querySelectorAll('.nav-item').forEach(b => {
     b.classList.toggle('active', b.dataset.tab === name);
   });
-  if (name === 'dashboard') loadDashboard();
-  if (name === 'receipts') loadReceipts();
-  if (name === 'budgets') loadBudgets();
+  renderCurrent();
 }
 
-// ── Utilities ──────────────────────────────────────────────
-
-function uid() {
-  if (crypto && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+function renderCurrent() {
+  if (currentPage === 'dashboard') renderDashboard();
+  else if (currentPage === 'transactions') renderTransactionsPage();
+  else if (currentPage === 'budgets') renderBudgetsPage();
 }
 
-function fmt(amount) {
-  return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(amount);
-}
+// ── Hotkeys ────────────────────────────────────────────────
 
-function makeCategorySelect(currentCat, onChange) {
-  const sel = document.createElement('select');
-  sel.className = 'category-select';
-  categories.forEach(cat => {
-    const opt = document.createElement('option');
-    opt.value = cat.id;
-    opt.textContent = cat.name;
-    if (cat.id === currentCat) opt.selected = true;
-    sel.appendChild(opt);
-  });
-  sel.addEventListener('change', () => onChange(sel.value));
-  return sel;
-}
-
-// ── Form Init ──────────────────────────────────────────────
-
-function initForm() {
-  document.getElementById('form-date').value = todayISO();
-  buildCategoryPills();
-}
-
-function todayISO() {
-  return new Date().toISOString().split('T')[0];
-}
-
-function buildCategoryPills() {
-  const container = document.getElementById('category-pills');
-  container.innerHTML = '';
-  categories.forEach((cat, i) => {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'cat-pill' + (i === 0 ? ' active' : '');
-    btn.dataset.cat = cat.id;
-    btn.textContent = cat.name;
-    btn.style.setProperty('--cat-color', cat.color);
-    btn.addEventListener('click', () => {
-      container.querySelectorAll('.cat-pill').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-    });
-    container.appendChild(btn);
-  });
-}
-
-function getSelectedCategory() {
-  return document.querySelector('.cat-pill.active')?.dataset.cat || 'other';
-}
-
-// ── Form Items ─────────────────────────────────────────────
-
-function addFormItem() {
-  const id = ++itemCounter;
-  const table = document.getElementById('form-items-table');
-  const hint = document.getElementById('no-items-hint');
-  const tbody = document.getElementById('form-items-body');
-
-  hint.classList.add('hidden');
-  table.classList.remove('hidden');
-
-  const tr = document.createElement('tr');
-  tr.id = `form-item-${id}`;
-  tr.innerHTML = `
-    <td><input type="text" class="item-input desc" placeholder="Description"></td>
-    <td><input type="number" class="item-input qty" value="1" min="0.01" step="any"></td>
-    <td><input type="number" class="item-input price" placeholder="0.00" min="0" step="0.01"></td>
-    <td class="item-total-cell">—</td>
-    <td><button type="button" class="remove-item-btn" onclick="removeFormItem(${id})">&#215;</button></td>
-  `;
-
-  const qty = tr.querySelector('.qty');
-  const price = tr.querySelector('.price');
-  const total = tr.querySelector('.item-total-cell');
-
-  const recalc = () => {
-    const q = parseFloat(qty.value);
-    const p = parseFloat(price.value);
-    total.textContent = (q > 0 && p > 0) ? fmt(q * p) : '—';
-    syncReceiptTotal();
-  };
-
-  qty.addEventListener('input', recalc);
-  price.addEventListener('input', recalc);
-
-  tbody.appendChild(tr);
-  tr.querySelector('.desc').focus();
-}
-
-function removeFormItem(id) {
-  document.getElementById(`form-item-${id}`)?.remove();
-  const tbody = document.getElementById('form-items-body');
-  if (!tbody.children.length) {
-    document.getElementById('form-items-table').classList.add('hidden');
-    document.getElementById('no-items-hint').classList.remove('hidden');
-  }
-  syncReceiptTotal();
-}
-
-function syncReceiptTotal() {
-  let sum = 0;
-  let hasAny = false;
-  document.querySelectorAll('#form-items-body tr').forEach(tr => {
-    const q = parseFloat(tr.querySelector('.qty')?.value);
-    const p = parseFloat(tr.querySelector('.price')?.value);
-    if (q > 0 && p > 0) { sum += q * p; hasAny = true; }
-  });
-  if (hasAny) {
-    document.getElementById('form-total').value = sum.toFixed(2);
-  }
-}
-
-// ── Form Submit ────────────────────────────────────────────
-
-async function submitForm(e) {
-  e.preventDefault();
-
-  const storeInput = document.getElementById('form-store');
-  const totalInput = document.getElementById('form-total');
-  const errorEl = document.getElementById('form-error');
-
-  storeInput.classList.remove('invalid');
-  totalInput.classList.remove('invalid');
-  errorEl.classList.add('hidden');
-
-  const storeName = storeInput.value.trim();
-  const date = document.getElementById('form-date').value;
-  const total = parseFloat(totalInput.value);
-
-  if (!storeName) {
-    storeInput.classList.add('invalid');
-    storeInput.focus();
-    return;
-  }
-  if (!date) return;
-  if (isNaN(total) || total < 0) {
-    totalInput.classList.add('invalid');
-    showFormError('Please enter a valid total amount.');
-    return;
-  }
-
-  const category = getSelectedCategory();
-  const receiptId = uid();
-  const receipt = {
-    id: receiptId,
-    date,
-    store: storeName,
-    total: Math.round(total * 100) / 100,
-    uploaded_at: new Date().toISOString(),
-    category,
-  };
-
-  const items = [];
-  document.querySelectorAll('#form-items-body tr').forEach(tr => {
-    const desc = tr.querySelector('.desc')?.value.trim() || '';
-    const qty = parseFloat(tr.querySelector('.qty')?.value);
-    const price = parseFloat(tr.querySelector('.price')?.value);
-    if (desc || (qty > 0 && price > 0)) {
-      items.push({
-        id: uid(),
-        receipt_id: receiptId,
-        description: desc,
-        quantity: qty > 0 ? qty : '',
-        unit_price: price > 0 ? price : '',
-        total_price: (qty > 0 && price > 0) ? Math.round(qty * price * 100) / 100 : '',
-        category,
-      });
+function bindGlobalHotkeys() {
+  window.addEventListener('keydown', e => {
+    const tag = e.target.tagName;
+    const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+    if (inField) return;
+    if (e.key === 'n' || e.key === 'N') {
+      e.preventDefault();
+      focusQuickAdd();
     }
+    if (e.key === '1') showTab('dashboard');
+    if (e.key === '2') showTab('transactions');
+    if (e.key === '3') showTab('budgets');
+    if (e.key === '4') showTab('settings');
   });
+}
 
-  const btn = document.getElementById('form-submit');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
+function focusQuickAdd() {
+  if (currentPage !== 'dashboard') showTab('dashboard');
+  const inp = document.getElementById('quickbar-input');
+  if (inp) inp.focus();
+}
+
+// ── Quickbar ──────────────────────────────────────────────
+
+function bindQuickbar() {
+  const input = document.getElementById('quickbar-input');
+  if (!input) return;
+  input.addEventListener('input', updateQuickbarPreview);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); commitQuickAdd(); }
+    if (e.key === 'Escape') { input.value = ''; updateQuickbarPreview(); }
+  });
+}
+
+function updateQuickbarPreview() {
+  const input = document.getElementById('quickbar-input');
+  const chips = document.getElementById('quickbar-chips');
+  const btn = document.getElementById('quickbar-add-btn');
+  const parsed = parseQuickInput(input.value);
+  chips.innerHTML = '';
+
+  const canAdd = parsed && parsed.amount != null && parsed.amount > 0 && parsed.store;
+  btn.disabled = !canAdd;
+
+  if (!parsed) return;
+
+  if (parsed.amount != null) {
+    const chip = document.createElement('span');
+    chip.className = 'parse-chip';
+    chip.innerHTML = `<span class="dot"></span>${fmt(parsed.amount)}`;
+    chips.appendChild(chip);
+  }
+  if (parsed.store) {
+    const cat = categoryById(parsed.category);
+    const chip = document.createElement('span');
+    chip.className = 'parse-chip';
+    chip.style.background = 'transparent';
+    chip.style.color = cat.color;
+    chip.style.borderColor = cat.color + '55';
+    chip.innerHTML = `<span class="dot" style="background:${cat.color}"></span>${cat.name}`;
+    chips.appendChild(chip);
+  }
+  if (parsed.dateLabel && parsed.dateLabel !== 'today') {
+    const chip = document.createElement('span');
+    chip.className = 'parse-chip muted';
+    chip.textContent = parsed.dateLabel;
+    chips.appendChild(chip);
+  }
+}
+
+async function commitQuickAdd() {
+  const input = document.getElementById('quickbar-input');
+  const parsed = parseQuickInput(input.value);
+  if (!parsed || parsed.amount == null || parsed.amount <= 0 || !parsed.store) return;
+
+  const receipt = {
+    id: uid(),
+    date: parsed.date,
+    store: parsed.store,
+    total: Math.round(parsed.amount * 100) / 100,
+    uploaded_at: new Date().toISOString(),
+    category: parsed.category,
+  };
+
+  input.value = '';
+  updateQuickbarPreview();
+  if (!cache) cache = { receipts: [], items: [], budgets: [], categories: [] };
+  cache.receipts.push(receipt);
+  renderDashboard();
 
   try {
-    await apiPost({ action: 'add_receipt', receipt, items });
-    if (cache) {
-      cache.receipts.push(receipt);
-      cache.items.push(...items);
-    }
-    showSuccess(receipt);
-  } catch (err) {
-    showFormError('Save failed: ' + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Save Receipt';
+    await apiPost({ action: 'add_receipt', receipt, items: [] });
+    showToast(`Added ${fmt(receipt.total)} · ${categoryById(receipt.category).name}`);
+  } catch (e) {
+    cache.receipts = cache.receipts.filter(r => r.id !== receipt.id);
+    renderDashboard();
+    showToast('Save failed: ' + e.message, { error: true });
   }
+  input.focus();
 }
 
-function showFormError(msg) {
-  const el = document.getElementById('form-error');
-  el.textContent = msg;
-  el.classList.remove('hidden');
-}
+// ── Dashboard render ───────────────────────────────────────
 
-function showSuccess(data) {
-  const catName = categories.find(c => c.id === data.category)?.name || data.category;
-  document.getElementById('success-store').textContent = data.store;
-  document.getElementById('success-detail').textContent =
-    `${fmt(data.total)} · ${catName} · ${data.date}`;
-  document.getElementById('add-form-wrapper').classList.add('hidden');
-  document.getElementById('save-success').classList.remove('hidden');
-}
-
-function showAddForm() {
-  resetForm();
-  document.getElementById('save-success').classList.add('hidden');
-  document.getElementById('add-form-wrapper').classList.remove('hidden');
-}
-
-function resetForm() {
-  document.getElementById('receipt-form').reset();
-  document.getElementById('form-date').value = todayISO();
-  document.getElementById('form-error').classList.add('hidden');
-  document.getElementById('form-items-body').innerHTML = '';
-  document.getElementById('form-items-table').classList.add('hidden');
-  document.getElementById('no-items-hint').classList.remove('hidden');
-  buildCategoryPills();
-  itemCounter = 0;
-}
-
-// ── Dashboard ──────────────────────────────────────────────
-
-function computeDashboard(receipts) {
+function computeMonthStats(range) {
+  const receipts = (cache && cache.receipts) || [];
+  const items = (cache && cache.items) || [];
+  const itemsByReceipt = {};
+  items.forEach(it => {
+    (itemsByReceipt[it.receipt_id] = itemsByReceipt[it.receipt_id] || []).push(it);
+  });
   const catIds = new Set(categories.map(c => c.id));
   const spendByCat = {};
   categories.forEach(c => { spendByCat[c.id] = 0; });
+  let total = 0;
+  const monthReceipts = [];
 
   receipts.forEach(r => {
-    let cat = r.category || 'other';
-    if (!catIds.has(cat)) cat = 'other';
-    const amt = parseFloat(r.total);
-    if (!isNaN(amt)) spendByCat[cat] += amt;
+    if (!isThisMonth(r.date, range)) return;
+    monthReceipts.push(r);
+    const t = parseFloat(r.total);
+    if (isNaN(t)) return;
+    total += t;
+    let receiptCat = r.category || 'other';
+    if (!catIds.has(receiptCat)) receiptCat = 'other';
+    const its = itemsByReceipt[r.id] || [];
+    let itemSum = 0;
+    its.forEach(it => {
+      const ip = parseFloat(it.total_price);
+      if (isNaN(ip)) return;
+      let ic = it.category || receiptCat;
+      if (!catIds.has(ic)) ic = 'other';
+      spendByCat[ic] += ip;
+      itemSum += ip;
+    });
+    const remainder = t - itemSum;
+    if (Math.abs(remainder) > 0.005) spendByCat[receiptCat] += remainder;
   });
 
-  const groceryReceipts = receipts
-    .filter(r => r.category === 'groceries')
-    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+  return { total, spendByCat, monthReceipts };
+}
 
-  let running = 0;
-  const groceryOverTime = [];
-  groceryReceipts.forEach(r => {
+function renderDashboard() {
+  if (!cache) return;
+  updateSidebarMonth();
+  const range = monthRange();
+  const stats = computeMonthStats(range);
+  const budgets = getBudgetMap();
+  const totalBudget = Object.values(budgets).reduce((s, v) => s + v, 0);
+
+  document.getElementById('dash-sub').textContent =
+    `${range.monthName} ${range.year} — day ${range.today} of ${range.total}`;
+  document.getElementById('hero-month-label').textContent = range.monthName;
+
+  renderHero(stats.total, totalBudget, range);
+  renderCatGrid(stats.spendByCat, budgets, range);
+  renderHeatmap(stats.monthReceipts, range);
+  renderRecent(stats.monthReceipts);
+}
+
+function renderHero(totalSpent, totalBudget, range) {
+  const pacePct = pacePercent(range);
+  const spentPct = totalBudget > 0 ? totalSpent / totalBudget : 0;
+  const expected = totalBudget * pacePct;
+  const over = spentPct > 1;
+  const ahead = !over && totalSpent > expected + 1;
+  const onTrack = !over && !ahead;
+
+  const heroNum = document.getElementById('hero-num');
+  const parts = fmtParts(totalSpent);
+  heroNum.className = 'hero-num' + (over ? ' red' : (ahead ? ' amber' : ''));
+  heroNum.innerHTML = `<span class="currency">$</span>${parts.whole}<span class="cents">.${parts.cents}</span>`;
+
+  const spentBar = document.getElementById('pace-spent');
+  spentBar.className = 'pace-spent' + (over ? ' red' : (ahead ? ' amber' : ''));
+  spentBar.style.width = Math.min(Math.max(spentPct, 0), 1) * 100 + '%';
+
+  const marker = document.getElementById('pace-marker');
+  if (totalBudget > 0) {
+    marker.style.display = '';
+    marker.style.left = Math.min(pacePct, 1) * 100 + '%';
+  } else {
+    marker.style.display = 'none';
+  }
+
+  document.getElementById('pace-spent-label').textContent =
+    totalBudget > 0
+      ? `${fmt(totalSpent, { whole: true })} of ${fmt(totalBudget, { whole: true })} budget`
+      : `${fmt(totalSpent, { whole: true })} spent · no budget yet`;
+
+  const status = document.getElementById('pace-status');
+  if (totalBudget <= 0) {
+    status.className = 'pace-status';
+    status.textContent = '';
+  } else if (over) {
+    status.className = 'pace-status over';
+    status.textContent = `${fmt(totalSpent - totalBudget, { whole: true })} over`;
+  } else if (ahead) {
+    status.className = 'pace-status warn';
+    status.textContent = `${fmt(totalSpent - expected, { whole: true })} ahead of pace`;
+  } else {
+    status.className = 'pace-status ok';
+    status.textContent = 'On pace';
+  }
+
+  const remaining = Math.max(totalBudget - totalSpent, 0);
+  const daysLeft = Math.max(range.total - range.today, 0);
+  const dailyAllowance = daysLeft > 0 ? remaining / daysLeft : remaining;
+  const projection = (totalBudget > 0 && range.today > 0)
+    ? totalSpent * (range.total / range.today)
+    : 0;
+  const projOver = projection > totalBudget && totalBudget > 0;
+
+  document.getElementById('allowance-days-label').textContent =
+    `For the next ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+  document.getElementById('allowance-amount').innerHTML =
+    totalBudget > 0
+      ? `${fmt(dailyAllowance)}<span style="font-size:14px;color:var(--ink-3);margin-left:6px">/ day</span>`
+      : `<span style="color:var(--ink-3);font-size:18px">Set a budget →</span>`;
+  document.getElementById('allowance-remaining').textContent = totalBudget > 0 ? fmt(remaining) : '—';
+  const proj = document.getElementById('allowance-projection');
+  proj.textContent = totalBudget > 0 ? fmt(projection, { whole: true }) : '—';
+  proj.className = 'val small' + (projOver ? ' red' : '');
+}
+
+function renderCatGrid(spendByCat, budgets, range) {
+  const grid = document.getElementById('cat-grid');
+  grid.innerHTML = '';
+  const pacePct = pacePercent(range);
+
+  const visible = categories.filter(c => {
+    const spent = spendByCat[c.id] || 0;
+    const budget = budgets[c.id] || 0;
+    return spent > 0 || budget > 0;
+  });
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'cat-card empty';
+    empty.style.gridColumn = '1 / -1';
+    empty.innerHTML = `
+      <div style="font-family:var(--font-serif);font-size:22px;color:var(--ink-2)">No category activity yet.</div>
+      <div style="color:var(--ink-3)">Add a transaction or set a budget to see categories appear.</div>
+    `;
+    grid.appendChild(empty);
+    return;
+  }
+
+  visible.forEach(c => {
+    const spent = spendByCat[c.id] || 0;
+    const budget = budgets[c.id] || 0;
+    const hasBudget = budget > 0;
+    const pct = hasBudget ? spent / budget : 0;
+    const expected = hasBudget ? budget * pacePct : 0;
+    const ahead = hasBudget && spent > expected + 0.5;
+    const over = pct > 1;
+    const status = over ? 'over' : (ahead ? 'warn' : 'ok');
+    const remaining = budget - spent;
+
+    const card = document.createElement('div');
+    card.className = 'cat-card';
+    card.style.setProperty('--cat-color', c.color);
+
+    const amountInner = hasBudget
+      ? `${fmt(spent, { whole: spent >= 100 })}<span class="of">/ ${fmt(budget, { whole: true })}</span>`
+      : `${fmt(spent, { whole: spent >= 100 })}`;
+
+    const foot = hasBudget
+      ? `<span>${fmt(Math.max(remaining, 0), { whole: true })} left</span>
+         <span class="pill ${status}">${
+           over ? `${Math.round((pct - 1) * 100)}% over`
+                : ahead ? `${Math.round((pct - pacePct) * 100)}% ahead`
+                : 'On pace'
+         }</span>`
+      : `<span>No budget</span>`;
+
+    card.innerHTML = `
+      <div class="cat-head">
+        <div class="cat-name"><span class="cat-dot"></span>${c.name}</div>
+        <button class="btn btn-ghost btn-sm" data-cat="${c.id}">${hasBudget ? 'edit' : 'set'}</button>
+      </div>
+      <div class="cat-amount">${amountInner}</div>
+      <div class="cat-bar">
+        <div class="cat-bar-fill${over ? ' over' : ''}" style="width:${Math.min(pct, 1) * 100}%"></div>
+        ${hasBudget ? `<div class="cat-pace-mark" style="left:${Math.min(pacePct, 1) * 100}%"></div>` : ''}
+      </div>
+      <div class="cat-foot">${foot}</div>
+    `;
+    card.querySelector('button[data-cat]').addEventListener('click', () => showBudgetEditor(c.id));
+    grid.appendChild(card);
+  });
+}
+
+function renderHeatmap(monthReceipts, range) {
+  const card = document.getElementById('heatmap-card');
+  const dailyTotals = {};
+  monthReceipts.forEach(r => {
     const amt = parseFloat(r.total);
-    if (!isNaN(amt)) {
-      running += amt;
-      groceryOverTime.push({
-        date: String(r.date),
-        store: r.store,
-        amount: Math.round(amt * 100) / 100,
-        running_total: Math.round(running * 100) / 100,
+    if (!r.date || isNaN(amt)) return;
+    dailyTotals[r.date] = (dailyTotals[r.date] || 0) + amt;
+  });
+
+  const first = new Date(range.year, range.monthIdx, 1);
+  const startDow = first.getDay();
+  const cells = [];
+  for (let i = 0; i < startDow; i++) cells.push(null);
+  for (let d = 1; d <= range.total; d++) cells.push(d);
+  while (cells.length % 7) cells.push(null);
+
+  const max = Math.max(0, ...Object.values(dailyTotals));
+  function levelFor(amt) {
+    if (!amt || max <= 0) return 0;
+    const r = amt / max;
+    if (r < 0.18) return 1;
+    if (r < 0.4)  return 2;
+    if (r < 0.7)  return 3;
+    return 4;
+  }
+
+  const dowLabels = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+  let html = '<div class="eyebrow">Spending by day</div><div class="heatmap">';
+  dowLabels.forEach(l => { html += `<div class="dow">${l}</div>`; });
+  cells.forEach(d => {
+    if (d === null) { html += '<div class="cell" style="background:transparent"></div>'; return; }
+    const dateStr = formatISO(new Date(range.year, range.monthIdx, d));
+    const amt = dailyTotals[dateStr] || 0;
+    const lvl = levelFor(amt);
+    const isFuture = d > range.today;
+    const isToday = d === range.today;
+    html += `<div class="cell${isToday ? ' today' : ''}${isFuture ? ' future' : ''}" data-level="${lvl}">
+      <span class="cell-day">${d}</span>
+      <div class="cell-tip">${range.monthShort} ${d}: ${fmt(amt)}</div>
+    </div>`;
+  });
+  html += '</div><div class="heatmap-legend"><span>Less</span><div class="scale">';
+  [0,1,2,3,4].forEach(l => { html += `<div class="cell" data-level="${l}"></div>`; });
+  html += '</div><span>More</span></div>';
+  card.innerHTML = html;
+}
+
+// ── Receipt list rendering ────────────────────────────────
+
+function buildReceiptRow(r) {
+  const cat = categoryById(r.category);
+  const d = new Date(r.date + 'T00:00:00');
+  const row = document.createElement('div');
+  row.className = 'recent-row';
+  row.dataset.id = r.id;
+
+  const dayCell = document.createElement('div');
+  dayCell.className = 'recent-day';
+  dayCell.innerHTML = `<span>${d.getDate()}</span><span class="mo">${d.toLocaleString('en-US', { month: 'short' })}</span>`;
+
+  const storeCell = document.createElement('div');
+  storeCell.className = 'recent-store';
+  storeCell.title = 'Click to view items';
+  storeCell.textContent = r.store || '—';
+  storeCell.addEventListener('click', () => toggleItems(r.id, row));
+
+  const catCell = document.createElement('div');
+  const catSel = document.createElement('select');
+  catSel.className = 'recent-cat-select';
+  categories.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.name;
+    if (c.id === r.category) opt.selected = true;
+    catSel.appendChild(opt);
+  });
+  catSel.addEventListener('change', () => updateReceiptCategory(r.id, catSel.value));
+  catCell.appendChild(catSel);
+
+  const amtCell = document.createElement('div');
+  amtCell.className = 'recent-amount';
+  amtCell.textContent = fmt(r.total);
+
+  const actCell = document.createElement('div');
+  actCell.className = 'recent-actions';
+  const editBtn = document.createElement('button');
+  editBtn.className = 'recent-icon-btn';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', () => openReceiptModal(r));
+  actCell.appendChild(editBtn);
+
+  const delCell = document.createElement('div');
+  const delBtn = document.createElement('button');
+  delBtn.className = 'recent-delete';
+  delBtn.title = 'Delete';
+  delBtn.textContent = '×';
+  delBtn.addEventListener('click', () => deleteReceipt(r));
+  delCell.appendChild(delBtn);
+
+  [dayCell, storeCell, catCell, amtCell, actCell, delCell].forEach(el => row.appendChild(el));
+  return row;
+}
+
+function toggleItems(receiptId, row) {
+  const existing = row.parentElement.querySelector(`[data-items-for="${receiptId}"]`);
+  if (existing) { existing.remove(); return; }
+  const items = ((cache && cache.items) || []).filter(i => i.receipt_id === receiptId);
+  const wrap = document.createElement('div');
+  wrap.dataset.itemsFor = receiptId;
+  wrap.className = 'items-detail';
+
+  if (items.length === 0) {
+    wrap.innerHTML = `<div class="no-items">No line items on this receipt.</div>`;
+  } else {
+    const tbl = document.createElement('table');
+    tbl.innerHTML = `
+      <thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Total</th><th>Category</th></tr></thead>
+      <tbody></tbody>
+    `;
+    const tbody = tbl.querySelector('tbody');
+    items.forEach(it => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${it.description || '—'}</td>
+        <td>${it.quantity !== '' ? it.quantity : '—'}</td>
+        <td>${it.unit_price !== '' ? fmt(it.unit_price) : '—'}</td>
+        <td>${it.total_price !== '' ? fmt(it.total_price) : '—'}</td>
+        <td></td>
+      `;
+      const sel = document.createElement('select');
+      sel.className = 'recent-cat-select';
+      categories.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id; opt.textContent = c.name;
+        if (c.id === it.category) opt.selected = true;
+        sel.appendChild(opt);
       });
-    }
-  });
-
-  const groceryTrips = groceryReceipts.length;
-  const groceryTotal = spendByCat['groceries'] || 0;
-  const avgGrocery = groceryTrips ? groceryTotal / groceryTrips : 0;
-
-  return {
-    total_spend: Math.round(Object.values(spendByCat).reduce((a, b) => a + b, 0) * 100) / 100,
-    total_receipts: receipts.length,
-    avg_grocery_trip: Math.round(avgGrocery * 100) / 100,
-    grocery_total: Math.round(groceryTotal * 100) / 100,
-    grocery_trips: groceryTrips,
-    spend_by_category: categories.map(c => ({ ...c, total: Math.round((spendByCat[c.id] || 0) * 100) / 100 })),
-    grocery_over_time: groceryOverTime,
-  };
-}
-
-async function loadDashboard() {
-  let data;
-  try {
-    data = await getData();
-  } catch (e) {
-    return;
+      sel.addEventListener('change', () => updateItemCategory(it.id, sel.value));
+      tr.querySelector('td:last-child').appendChild(sel);
+      tbody.appendChild(tr);
+    });
+    wrap.appendChild(tbl);
   }
-  const dash = computeDashboard(data.receipts);
 
-  document.getElementById('stat-total-spend').textContent = fmt(dash.total_spend);
-  document.getElementById('stat-total-receipts').textContent = dash.total_receipts;
-  document.getElementById('stat-grocery-total').textContent = fmt(dash.grocery_total);
-  document.getElementById('stat-avg-grocery').textContent = fmt(dash.avg_grocery_trip);
-  document.getElementById('stat-grocery-trips').textContent = dash.grocery_trips;
-
-  renderCategoryChart(dash.spend_by_category);
-  renderGroceryChart(dash.grocery_over_time);
-  renderBudgetProgress(data.receipts);
+  row.insertAdjacentElement('afterend', wrap);
 }
 
-function renderCategoryChart(spendByCategory) {
-  const nonZero = spendByCategory.filter(c => c.total > 0);
-  const canvas = document.getElementById('chart-category');
-  const empty = document.getElementById('chart-category-empty');
+function renderRecent(monthReceipts) {
+  const list = document.getElementById('recent-list');
+  const meta = document.getElementById('recent-meta');
+  meta.textContent = `${monthReceipts.length} THIS MONTH`;
+  list.innerHTML = '';
 
-  if (nonZero.length === 0) {
-    canvas.classList.add('hidden');
-    empty.classList.remove('hidden');
+  if (monthReceipts.length === 0) {
+    list.innerHTML = `
+      <div class="recent">
+        <div class="recent-empty">
+          <div class="ttl">Nothing yet this month.</div>
+          <div>Press <span class="mono" style="background:var(--panel-2);border:1px solid var(--hairline);padding:1px 6px;border-radius:4px">N</span> or type in the bar above to add your first.</div>
+        </div>
+      </div>`;
     return;
   }
 
-  canvas.classList.remove('hidden');
-  empty.classList.add('hidden');
+  const sorted = [...monthReceipts].sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || ''))
+  );
 
-  if (categoryChart) categoryChart.destroy();
-  categoryChart = new Chart(canvas.getContext('2d'), {
-    type: 'doughnut',
-    data: {
-      labels: nonZero.map(c => c.name),
-      datasets: [{
-        data: nonZero.map(c => c.total),
-        backgroundColor: nonZero.map(c => c.color),
-        borderWidth: 2,
-        borderColor: '#fff',
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { position: 'bottom', labels: { padding: 16, font: { size: 12 } } },
-        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fmt(ctx.raw)}` } },
-      },
-    },
-  });
+  const wrap = document.createElement('div');
+  wrap.className = 'recent';
+  sorted.slice(0, 12).forEach(r => wrap.appendChild(buildReceiptRow(r)));
+  list.appendChild(wrap);
 }
 
-function renderGroceryChart(groceryOverTime) {
-  const canvas = document.getElementById('chart-grocery');
-  const empty = document.getElementById('chart-grocery-empty');
+// ── Transactions page ─────────────────────────────────────
 
-  if (groceryOverTime.length === 0) {
-    canvas.classList.add('hidden');
-    empty.classList.remove('hidden');
-    return;
-  }
+function renderTransactionsPage() {
+  if (!cache) return;
+  const range = monthRange();
+  const receipts = (cache && cache.receipts) || [];
+  const thisMonth = receipts.filter(r => isThisMonth(r.date, range)).length;
+  document.getElementById('txn-sub').textContent =
+    `${receipts.length} total · ${thisMonth} this month`;
 
-  canvas.classList.remove('hidden');
-  empty.classList.add('hidden');
-
-  if (groceryChart) groceryChart.destroy();
-  groceryChart = new Chart(canvas.getContext('2d'), {
-    type: 'bar',
-    data: {
-      labels: groceryOverTime.map(d => d.date),
-      datasets: [
-        {
-          label: 'Trip Amount',
-          data: groceryOverTime.map(d => d.amount),
-          backgroundColor: '#22c55e44',
-          borderColor: '#22c55e',
-          borderWidth: 1,
-          order: 2,
-        },
-        {
-          label: 'Running Total',
-          type: 'line',
-          data: groceryOverTime.map(d => d.running_total),
-          borderColor: '#0f172a',
-          borderWidth: 2,
-          pointRadius: 3,
-          tension: 0.3,
-          fill: false,
-          order: 1,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      scales: {
-        y: { beginAtZero: true, ticks: { callback: val => fmt(val) } },
-        x: { ticks: { maxRotation: 45 } },
-      },
-      plugins: {
-        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: ${fmt(ctx.raw)}` } },
-      },
-    },
-  });
-}
-
-// ── Receipts ───────────────────────────────────────────────
-
-async function loadReceipts() {
-  const container = document.getElementById('receipts-container');
-  container.innerHTML = '<p class="empty-state">Loading…</p>';
-
-  let data;
-  try {
-    data = await getData();
-  } catch (e) {
-    container.innerHTML = `<p class="empty-state error">Could not load: ${e.message}</p>`;
-    return;
-  }
-
-  const receipts = data.receipts;
+  const container = document.getElementById('transactions-list');
   container.innerHTML = '';
 
   if (receipts.length === 0) {
-    container.innerHTML = '<p class="empty-state">No receipts yet. Add one to get started.</p>';
+    container.innerHTML = `
+      <div class="recent">
+        <div class="recent-empty">
+          <div class="ttl">No transactions yet.</div>
+          <div>Press <span class="mono" style="background:var(--panel-2);border:1px solid var(--hairline);padding:1px 6px;border-radius:4px">N</span> or click "+ New" to add one.</div>
+        </div>
+      </div>`;
     return;
   }
 
@@ -619,369 +853,425 @@ async function loadReceipts() {
     String(b.date || '').localeCompare(String(a.date || ''))
   );
 
-  const wrapper = document.createElement('div');
-  wrapper.className = 'receipts-wrapper';
+  const byDate = {};
+  sorted.forEach(r => { (byDate[r.date] = byDate[r.date] || []).push(r); });
 
-  const table = document.createElement('table');
-  table.className = 'receipts-table';
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>Date</th>
-        <th>Store</th>
-        <th>Total</th>
-        <th>Category</th>
-        <th></th>
-        <th></th>
-      </tr>
-    </thead>
-    <tbody id="receipts-tbody"></tbody>
-  `;
-  wrapper.appendChild(table);
-  container.appendChild(wrapper);
-
-  const tbody = table.querySelector('tbody');
-  sorted.forEach(receipt => {
-    tbody.appendChild(buildReceiptRow(receipt));
+  const wrap = document.createElement('div');
+  wrap.className = 'recent';
+  Object.keys(byDate).forEach(dateStr => {
+    const d = new Date(dateStr + 'T00:00:00');
+    const dayTotal = byDate[dateStr].reduce((s, r) => s + (parseFloat(r.total) || 0), 0);
+    const header = document.createElement('div');
+    header.className = 'day-group';
+    header.innerHTML = `<span>${d.toLocaleString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</span><span>${fmt(dayTotal)}</span>`;
+    wrap.appendChild(header);
+    byDate[dateStr].forEach(r => wrap.appendChild(buildReceiptRow(r)));
   });
+  container.appendChild(wrap);
 }
 
-function buildReceiptRow(receipt) {
-  const tr = document.createElement('tr');
-  tr.dataset.receiptId = receipt.id;
-  renderReceiptRow(tr, receipt, false);
-  return tr;
-}
-
-function renderReceiptRow(tr, receipt, editing) {
-  tr.innerHTML = '';
-  if (editing) {
-    const dateTd = document.createElement('td');
-    const dateInput = document.createElement('input');
-    dateInput.type = 'date';
-    dateInput.className = 'row-edit-input';
-    dateInput.value = receipt.date || '';
-    dateTd.appendChild(dateInput);
-
-    const storeTd = document.createElement('td');
-    const storeInput = document.createElement('input');
-    storeInput.type = 'text';
-    storeInput.className = 'row-edit-input';
-    storeInput.value = receipt.store || '';
-    storeTd.appendChild(storeInput);
-
-    const totalTd = document.createElement('td');
-    const totalWrap = document.createElement('span');
-    totalWrap.className = 'row-edit-total';
-    const dollar = document.createElement('span');
-    dollar.textContent = '$';
-    dollar.className = 'row-edit-dollar';
-    const totalInput = document.createElement('input');
-    totalInput.type = 'number';
-    totalInput.step = '0.01';
-    totalInput.min = '0';
-    totalInput.className = 'row-edit-input';
-    totalInput.value = receipt.total != null ? receipt.total : '';
-    totalWrap.appendChild(dollar);
-    totalWrap.appendChild(totalInput);
-    totalTd.appendChild(totalWrap);
-
-    const catTd = document.createElement('td');
-    const catSel = makeCategorySelect(receipt.category, () => {});
-    catTd.appendChild(catSel);
-
-    const saveTd = document.createElement('td');
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'expand-btn save';
-    saveBtn.textContent = 'Save';
-    saveBtn.addEventListener('click', async () => {
-      const updates = {
-        date: dateInput.value,
-        store: storeInput.value.trim(),
-        total: Math.round(parseFloat(totalInput.value) * 100) / 100,
-        category: catSel.value,
-      };
-      if (!updates.store || !updates.date || isNaN(updates.total) || updates.total < 0) {
-        alert('Please fill in store, date, and a valid total.');
-        return;
-      }
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving…';
-      try {
-        await saveReceiptEdits(receipt.id, updates);
-        const updated = cache.receipts.find(r => r.id === receipt.id) || receipt;
-        renderReceiptRow(tr, updated, false);
-      } catch (e) {
-        alert('Update failed: ' + e.message);
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Save';
-      }
-    });
-    saveTd.appendChild(saveBtn);
-
-    const cancelTd = document.createElement('td');
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'delete-btn';
-    cancelBtn.title = 'Cancel';
-    cancelBtn.textContent = '✕';
-    cancelBtn.addEventListener('click', () => renderReceiptRow(tr, receipt, false));
-    cancelTd.appendChild(cancelBtn);
-
-    [dateTd, storeTd, totalTd, catTd, saveTd, cancelTd].forEach(td => tr.appendChild(td));
-    storeInput.focus();
-    return;
-  }
-
-  const dateTd = document.createElement('td');
-  dateTd.textContent = receipt.date;
-
-  const storeTd = document.createElement('td');
-  storeTd.textContent = receipt.store;
-
-  const totalTd = document.createElement('td');
-  totalTd.textContent = fmt(receipt.total);
-
-  const catTd = document.createElement('td');
-  catTd.appendChild(makeCategorySelect(receipt.category, val => {
-    updateReceiptCategory(receipt.id, val);
-  }));
-
-  const actionsTd = document.createElement('td');
-  actionsTd.className = 'row-actions';
-  const editBtn = document.createElement('button');
-  editBtn.className = 'expand-btn';
-  editBtn.textContent = 'Edit';
-  editBtn.addEventListener('click', () => {
-    const existing = document.getElementById(`items-row-${receipt.id}`);
-    if (existing) existing.remove();
-    renderReceiptRow(tr, receipt, true);
-  });
-  const expandBtn = document.createElement('button');
-  expandBtn.className = 'expand-btn';
-  expandBtn.textContent = 'Items';
-  expandBtn.addEventListener('click', () => toggleItems(expandBtn, receipt.id, tr));
-  actionsTd.appendChild(editBtn);
-  actionsTd.appendChild(expandBtn);
-
-  const deleteTd = document.createElement('td');
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'delete-btn';
-  deleteBtn.title = 'Delete receipt';
-  deleteBtn.textContent = '✕';
-  deleteBtn.addEventListener('click', () => deleteReceipt(receipt.id, tr));
-  deleteTd.appendChild(deleteBtn);
-
-  [dateTd, storeTd, totalTd, catTd, actionsTd, deleteTd].forEach(td => tr.appendChild(td));
-}
-
-async function saveReceiptEdits(receiptId, updates) {
-  await apiPost({ action: 'update_receipt', id: receiptId, updates });
-  if (cache) {
-    const r = cache.receipts.find(r => r.id === receiptId);
-    if (r) Object.assign(r, updates);
-  }
-}
+// ── Receipt mutations ─────────────────────────────────────
 
 async function updateReceiptCategory(receiptId, category) {
+  const prev = cache && cache.receipts.find(r => r.id === receiptId);
+  if (prev) prev.category = category;
+  renderCurrent();
   try {
-    await apiPost({ action: 'update_receipt', id: receiptId, category });
-    if (cache) {
-      const r = cache.receipts.find(r => r.id === receiptId);
-      if (r) r.category = category;
-    }
+    await apiPost({ action: 'update_receipt', id: receiptId, updates: { category } });
   } catch (e) {
-    alert('Update failed: ' + e.message);
+    showToast('Update failed: ' + e.message, { error: true });
+    refreshData();
   }
 }
 
 async function updateItemCategory(itemId, category) {
+  const it = cache && cache.items.find(i => i.id === itemId);
+  if (it) it.category = category;
+  renderCurrent();
   try {
     await apiPost({ action: 'update_item', id: itemId, category });
-    if (cache) {
-      const it = cache.items.find(i => i.id === itemId);
-      if (it) it.category = category;
-    }
   } catch (e) {
-    alert('Update failed: ' + e.message);
+    showToast('Update failed: ' + e.message, { error: true });
+    refreshData();
   }
 }
 
-function toggleItems(btn, receiptId, parentRow) {
-  const existing = document.getElementById(`items-row-${receiptId}`);
-  if (existing) {
-    existing.remove();
-    btn.textContent = 'Items';
-    return;
-  }
-
-  const receiptItems = (cache?.items || []).filter(i => i.receipt_id === receiptId);
-  btn.textContent = 'Hide';
-
-  const itemsRow = document.createElement('tr');
-  itemsRow.id = `items-row-${receiptId}`;
-  itemsRow.className = 'items-detail-row';
-
-  const td = document.createElement('td');
-  td.colSpan = 6;
-
-  if (receiptItems.length === 0) {
-    const p = document.createElement('p');
-    p.className = 'no-items';
-    p.textContent = 'No line items on this receipt.';
-    td.appendChild(p);
-  } else {
-    const tbl = document.createElement('table');
-    tbl.className = 'items-table nested';
-    tbl.innerHTML = `
-      <thead>
-        <tr>
-          <th>Description</th>
-          <th>Qty</th>
-          <th>Unit Price</th>
-          <th>Total</th>
-          <th>Category</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    `;
-    const itbody = tbl.querySelector('tbody');
-    receiptItems.forEach(item => {
-      const itr = document.createElement('tr');
-      itr.innerHTML = `
-        <td>${item.description || '—'}</td>
-        <td>${item.quantity !== '' ? item.quantity : '—'}</td>
-        <td>${item.unit_price !== '' ? fmt(item.unit_price) : '—'}</td>
-        <td>${item.total_price !== '' ? fmt(item.total_price) : '—'}</td>
-        <td></td>
-      `;
-      itr.querySelector('td:last-child').appendChild(
-        makeCategorySelect(item.category, val => updateItemCategory(item.id, val))
-      );
-      itbody.appendChild(itr);
-    });
-    td.appendChild(tbl);
-  }
-
-  itemsRow.appendChild(td);
-  parentRow.insertAdjacentElement('afterend', itemsRow);
-}
-
-async function deleteReceipt(receiptId, row) {
+async function deleteReceipt(r) {
   if (!confirm('Delete this receipt?')) return;
+  const removedReceipt = r;
+  const removedItems = ((cache && cache.items) || []).filter(i => i.receipt_id === r.id);
+  cache.receipts = cache.receipts.filter(x => x.id !== r.id);
+  cache.items = cache.items.filter(i => i.receipt_id !== r.id);
+  renderCurrent();
   try {
-    await apiPost({ action: 'delete_receipt', id: receiptId });
-    if (cache) {
-      cache.receipts = cache.receipts.filter(r => r.id !== receiptId);
-      cache.items = cache.items.filter(i => i.receipt_id !== receiptId);
-    }
-    document.getElementById(`items-row-${receiptId}`)?.remove();
-    row.remove();
-    if (cache && cache.receipts.length === 0) {
-      document.getElementById('receipts-container').innerHTML =
-        '<p class="empty-state">No receipts yet. Add one to get started.</p>';
-    }
+    await apiPost({ action: 'delete_receipt', id: r.id });
+    showToast(`Removed ${fmt(removedReceipt.total)} · ${removedReceipt.store}`, {
+      undo: async () => {
+        cache.receipts.push(removedReceipt);
+        cache.items.push(...removedItems);
+        renderCurrent();
+        try {
+          await apiPost({ action: 'add_receipt', receipt: removedReceipt, items: removedItems });
+        } catch (e) {
+          showToast('Undo failed: ' + e.message, { error: true });
+          refreshData();
+        }
+      }
+    });
   } catch (e) {
-    alert('Delete failed: ' + e.message);
+    cache.receipts.push(removedReceipt);
+    cache.items.push(...removedItems);
+    renderCurrent();
+    showToast('Delete failed: ' + e.message, { error: true });
   }
 }
 
-async function confirmClearAll() {
-  if (!confirm('Permanently delete ALL receipts and items from your Google Sheet? This cannot be undone.')) return;
-  try {
-    await apiPost({ action: 'clear' });
-    cache = { receipts: [], items: [] };
-    showDataStatus('All data cleared.');
-  } catch (e) {
-    showDataStatus('Clear failed: ' + e.message, true);
+// ── Modals: budget editor + receipt-with-items ───────────
+
+function openModal(html) {
+  const root = document.getElementById('modal-root');
+  root.innerHTML = `<div class="modal-backdrop" id="modal-backdrop"><div class="modal" id="modal-card">${html}</div></div>`;
+  const bd = document.getElementById('modal-backdrop');
+  bd.addEventListener('click', e => { if (e.target === bd) closeModal(); });
+  document.addEventListener('keydown', escClose);
+  return document.getElementById('modal-card');
+}
+
+function closeModal() {
+  document.getElementById('modal-root').innerHTML = '';
+  document.removeEventListener('keydown', escClose);
+}
+function escClose(e) { if (e.key === 'Escape') closeModal(); }
+
+function showBudgetEditor(focusCatId) {
+  const budgets = getBudgetMap();
+  let rows = '';
+  categories.forEach(c => {
+    rows += `
+      <div class="field" style="flex-direction:row;align-items:center;gap:12px">
+        <span class="cat-dot" style="background:${c.color};width:10px;height:10px"></span>
+        <label style="flex:1;font-size:14px;text-transform:none;letter-spacing:0;color:var(--ink)">${c.name}</label>
+        <div class="field-money" style="width:140px">
+          <span class="dollar">$</span>
+          <input type="number" step="1" min="0" data-cat="${c.id}" value="${budgets[c.id] != null ? budgets[c.id] : ''}" placeholder="0" />
+        </div>
+      </div>`;
+  });
+
+  const card = openModal(`
+    <h3>Monthly budgets</h3>
+    <div class="modal-sub">Set a target for each category. Leave at 0 to skip.</div>
+    <div class="modal-fields">${rows}</div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" onclick="closeModal();renderCurrent()">Done</button>
+    </div>
+  `);
+
+  card.querySelectorAll('input[data-cat]').forEach(input => {
+    input.addEventListener('blur', () => commitBudget(input.dataset.cat, input.value));
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+  });
+  if (focusCatId) {
+    const target = card.querySelector(`input[data-cat="${focusCatId}"]`);
+    if (target) target.focus();
   }
 }
 
-// ── Budgets Tab ────────────────────────────────────────────
-
-async function loadBudgets() {
+async function commitBudget(catId, raw) {
+  const trimmed = String(raw).trim();
+  const amount = trimmed === '' ? 0 : parseFloat(trimmed);
+  if (isNaN(amount) || amount < 0) return;
+  if (!cache.budgets) cache.budgets = [];
+  const existing = cache.budgets.find(b => b.category_id === catId);
+  if (amount > 0) {
+    if (existing) existing.amount = amount;
+    else cache.budgets.push({ category_id: catId, amount });
+  } else if (existing) {
+    cache.budgets = cache.budgets.filter(b => b.category_id !== catId);
+  }
   try {
-    await getData();
+    await apiPost({ action: 'set_budget', category_id: catId, amount });
   } catch (e) {
+    showToast('Could not save budget: ' + e.message, { error: true });
+    refreshData();
+  }
+}
+
+// Receipt modal — handles new + edit, with optional items
+
+let modalReceiptItemCounter = 0;
+
+function openReceiptModal(existing) {
+  const editing = !!existing;
+  const receipt = existing || {
+    id: uid(),
+    date: todayISO(),
+    store: '',
+    total: '',
+    category: categories[0]?.id || 'other',
+  };
+  modalReceiptItemCounter = 0;
+  const catChips = categories.map(c =>
+    `<button type="button" class="cat-chip${c.id === receipt.category ? ' active' : ''}" data-cat="${c.id}">
+       <span class="cat-dot" style="background:${c.color}"></span>${c.name}
+     </button>`
+  ).join('');
+
+  const itemsSection = editing ? '' : `
+      <div class="field">
+        <label>Items <span style="text-transform:none;letter-spacing:0;color:var(--ink-4)">— optional</span></label>
+        <table class="modal-items-table">
+          <thead><tr><th class="item-desc">Description</th><th>Qty</th><th>Price</th><th>Total</th><th>Category</th><th></th></tr></thead>
+          <tbody id="rm-items"></tbody>
+        </table>
+        <button type="button" class="add-item-link" onclick="addModalItem()">+ Add line item</button>
+      </div>`;
+
+  const card = openModal(`
+    <h3>${editing ? 'Edit transaction' : 'New transaction'}</h3>
+    <div class="modal-sub">${editing ? 'Update any field and save. Edit items by clicking the store name on a row.' : 'Fill in what matters, defaults handle the rest.'}</div>
+    <div class="modal-fields">
+      <div class="field">
+        <label>Store</label>
+        <input id="rm-store" type="text" value="${escapeAttr(receipt.store)}" placeholder="Where?" />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>Amount</label>
+          <div class="field-money">
+            <span class="dollar">$</span>
+            <input id="rm-total" type="number" step="0.01" min="0" placeholder="0.00" value="${receipt.total != null ? receipt.total : ''}" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Date</label>
+          <input id="rm-date" type="date" value="${receipt.date || todayISO()}" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <div class="cat-chips" id="rm-cats">${catChips}</div>
+      </div>
+      ${itemsSection}
+      <p id="rm-error" class="setup-error hidden"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="rm-save">${editing ? 'Save changes' : 'Add transaction'}</button>
+    </div>
+  `);
+
+  card.dataset.editing = editing ? '1' : '';
+  card.dataset.id = receipt.id;
+  card.dataset.category = receipt.category;
+
+  card.querySelectorAll('#rm-cats .cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      card.querySelectorAll('#rm-cats .cat-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      card.dataset.category = chip.dataset.cat;
+      card.querySelectorAll('#rm-items tr').forEach(tr => {
+        if (tr.dataset.catOverridden !== '1') {
+          const sel = tr.querySelector('.item-cat');
+          if (sel) sel.value = chip.dataset.cat;
+        }
+      });
+    });
+  });
+
+  document.getElementById('rm-save').addEventListener('click', () => commitReceiptModal(card));
+  setTimeout(() => document.getElementById('rm-store').focus(), 0);
+}
+
+function addModalItem(prefill) {
+  const tbody = document.getElementById('rm-items');
+  if (!tbody) return;
+  const id = ++modalReceiptItemCounter;
+  const tr = document.createElement('tr');
+  tr.dataset.itemId = prefill?.id || '';
+  const card = document.getElementById('modal-card');
+  const defaultCat = prefill?.category || card.dataset.category || categories[0]?.id || 'other';
+  if (prefill && prefill.category && prefill.category !== card.dataset.category) {
+    tr.dataset.catOverridden = '1';
+  }
+
+  tr.innerHTML = `
+    <td><input class="item-desc" type="text" value="${escapeAttr(prefill?.description || '')}" placeholder="Description" /></td>
+    <td><input class="item-qty" type="number" min="0.01" step="any" value="${prefill?.quantity || '1'}" /></td>
+    <td><input class="item-price" type="number" min="0" step="0.01" value="${prefill?.unit_price || ''}" placeholder="0.00" /></td>
+    <td class="item-total">—</td>
+    <td></td>
+    <td><button type="button" class="remove-item-btn" title="Remove">&times;</button></td>
+  `;
+
+  const sel = document.createElement('select');
+  sel.className = 'item-cat';
+  categories.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id; opt.textContent = c.name;
+    if (c.id === defaultCat) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  sel.addEventListener('change', () => { tr.dataset.catOverridden = '1'; });
+  tr.children[4].appendChild(sel);
+
+  const qty = tr.querySelector('.item-qty');
+  const price = tr.querySelector('.item-price');
+  const totalCell = tr.querySelector('.item-total');
+  function recalc() {
+    const q = parseFloat(qty.value);
+    const p = parseFloat(price.value);
+    totalCell.textContent = (q > 0 && p > 0) ? fmt(q * p) : '—';
+    syncReceiptTotalFromItems();
+  }
+  qty.addEventListener('input', recalc);
+  price.addEventListener('input', recalc);
+  recalc();
+
+  tr.querySelector('.remove-item-btn').addEventListener('click', () => {
+    tr.remove();
+    syncReceiptTotalFromItems();
+  });
+
+  tbody.appendChild(tr);
+}
+
+function syncReceiptTotalFromItems() {
+  let sum = 0;
+  let hasAny = false;
+  document.querySelectorAll('#rm-items tr').forEach(tr => {
+    const q = parseFloat(tr.querySelector('.item-qty')?.value);
+    const p = parseFloat(tr.querySelector('.item-price')?.value);
+    if (q > 0 && p > 0) { sum += q * p; hasAny = true; }
+  });
+  if (hasAny) {
+    const totalInput = document.getElementById('rm-total');
+    if (totalInput) totalInput.value = sum.toFixed(2);
+  }
+}
+
+async function commitReceiptModal(card) {
+  const editing = card.dataset.editing === '1';
+  const id = card.dataset.id;
+  const store = document.getElementById('rm-store').value.trim();
+  const date = document.getElementById('rm-date').value;
+  const total = parseFloat(document.getElementById('rm-total').value);
+  const category = card.dataset.category;
+  const err = document.getElementById('rm-error');
+  err.classList.add('hidden');
+
+  if (!store || !date || isNaN(total) || total < 0) {
+    err.textContent = 'Please fill in store, date, and a valid amount.';
+    err.classList.remove('hidden');
     return;
   }
-  renderBudgetsList();
-  renderCategoriesList();
-  renderColorPicker();
+
+  const items = [];
+  document.querySelectorAll('#rm-items tr').forEach(tr => {
+    const desc = tr.querySelector('.item-desc')?.value.trim() || '';
+    const qty = parseFloat(tr.querySelector('.item-qty')?.value);
+    const price = parseFloat(tr.querySelector('.item-price')?.value);
+    const itemCat = tr.querySelector('.item-cat')?.value || category;
+    const existingId = tr.dataset.itemId;
+    if (desc || (qty > 0 && price > 0)) {
+      items.push({
+        id: existingId || uid(),
+        receipt_id: id,
+        description: desc,
+        quantity: qty > 0 ? qty : '',
+        unit_price: price > 0 ? price : '',
+        total_price: (qty > 0 && price > 0) ? Math.round(qty * price * 100) / 100 : '',
+        category: itemCat,
+      });
+    }
+  });
+
+  const receipt = {
+    id,
+    date,
+    store,
+    total: Math.round(total * 100) / 100,
+    uploaded_at: new Date().toISOString(),
+    category,
+  };
+
+  const btn = document.getElementById('rm-save');
+  btn.disabled = true;
+  btn.textContent = editing ? 'Saving…' : 'Adding…';
+
+  try {
+    if (editing) {
+      const updates = { date, store, total: receipt.total, category };
+      await apiPost({ action: 'update_receipt', id, updates });
+      const r = cache.receipts.find(r => r.id === id);
+      if (r) Object.assign(r, updates);
+      showToast(`Updated ${fmt(receipt.total)} · ${categoryById(receipt.category).name}`);
+    } else {
+      await apiPost({ action: 'add_receipt', receipt, items });
+      cache.receipts.push(receipt);
+      cache.items.push(...items);
+      showToast(`Added ${fmt(receipt.total)} · ${categoryById(receipt.category).name}`);
+    }
+    closeModal();
+    renderCurrent();
+  } catch (e) {
+    err.textContent = 'Save failed: ' + e.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = editing ? 'Save changes' : 'Add transaction';
+  }
 }
 
-function renderBudgetsList() {
-  const container = document.getElementById('budgets-list');
-  if (!container) return;
-  container.innerHTML = '';
-  const budgets = getBudgetMap();
+// ── Budgets page ───────────────────────────────────────────
 
-  categories.forEach(cat => {
+function renderBudgetsPage() {
+  if (!cache) return;
+  const range = monthRange();
+  const stats = computeMonthStats(range);
+  const budgets = getBudgetMap();
+  const list = document.getElementById('budgets-list');
+  const pacePct = pacePercent(range);
+  list.innerHTML = '';
+
+  categories.forEach(c => {
+    const spent = stats.spendByCat[c.id] || 0;
+    const budget = budgets[c.id] || 0;
+    const pct = budget > 0 ? spent / budget : 0;
+    const over = pct > 1;
     const row = document.createElement('div');
     row.className = 'budget-row';
-
-    const swatch = document.createElement('span');
-    swatch.className = 'cat-swatch';
-    swatch.style.background = cat.color;
-
-    const name = document.createElement('span');
-    name.className = 'budget-row-name';
-    name.textContent = cat.name;
-
-    const inputWrap = document.createElement('div');
-    inputWrap.className = 'budget-input-wrap';
-    const dollar = document.createElement('span');
-    dollar.className = 'budget-dollar';
-    dollar.textContent = '$';
-    const input = document.createElement('input');
-    input.type = 'number';
-    input.min = '0';
-    input.step = '0.01';
-    input.placeholder = '0.00';
-    input.className = 'budget-input';
-    input.value = budgets[cat.id] != null ? budgets[cat.id] : '';
-    input.addEventListener('change', () => saveBudget(cat.id, input.value, input));
-    inputWrap.appendChild(dollar);
-    inputWrap.appendChild(input);
-
-    const status = document.createElement('span');
-    status.className = 'budget-row-status';
-
-    row.appendChild(swatch);
-    row.appendChild(name);
-    row.appendChild(inputWrap);
-    row.appendChild(status);
-    container.appendChild(row);
+    row.style.setProperty('--cat-color', c.color);
+    row.innerHTML = `
+      <div class="budget-row-name">
+        <span class="cat-dot" style="width:10px;height:10px;background:${c.color}"></span>
+        <span>${c.name}</span>
+      </div>
+      <div class="budget-row-progress">
+        <div class="cat-bar">
+          <div class="cat-bar-fill${over ? ' over' : ''}" style="background:${c.color};width:${Math.min(pct, 1) * 100}%"></div>
+          ${budget > 0 ? `<div class="cat-pace-mark" style="left:${Math.min(pacePct, 1) * 100}%"></div>` : ''}
+        </div>
+        <div class="meta">
+          <span>${fmt(spent)} spent</span>
+          <span>${budget > 0 ? fmt(Math.max(budget - spent, 0)) + ' left' : 'no budget'}</span>
+        </div>
+      </div>
+      <div class="field-money budget-row-input">
+        <span class="dollar">$</span>
+        <input type="number" step="1" min="0" data-cat="${c.id}" value="${budget || ''}" placeholder="0" />
+      </div>
+    `;
+    list.appendChild(row);
   });
-}
 
-async function saveBudget(categoryId, rawValue, inputEl) {
-  const trimmed = String(rawValue).trim();
-  const amount = trimmed === '' ? 0 : parseFloat(trimmed);
-  if (isNaN(amount) || amount < 0) {
-    inputEl.classList.add('invalid');
-    return;
-  }
-  inputEl.classList.remove('invalid');
-  const statusEl = inputEl.parentElement.nextElementSibling;
-  if (statusEl) statusEl.textContent = 'Saving…';
-  try {
-    await apiPost({ action: 'set_budget', category_id: categoryId, amount });
-    if (!cache.budgets) cache.budgets = [];
-    const existing = cache.budgets.find(b => b.category_id === categoryId);
-    if (amount > 0) {
-      if (existing) existing.amount = amount;
-      else cache.budgets.push({ category_id: categoryId, amount });
-    } else if (existing) {
-      cache.budgets = cache.budgets.filter(b => b.category_id !== categoryId);
-    }
-    if (statusEl) {
-      statusEl.textContent = 'Saved';
-      setTimeout(() => { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
-    }
-  } catch (e) {
-    if (statusEl) statusEl.textContent = 'Failed';
-    alert('Could not save budget: ' + e.message);
-  }
+  list.querySelectorAll('input[data-cat]').forEach(input => {
+    input.addEventListener('blur', () => commitBudget(input.dataset.cat, input.value).then(() => renderBudgetsPage()));
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+  });
+
+  renderCategoriesList();
+  renderColorPicker();
 }
 
 function renderCategoriesList() {
@@ -993,23 +1283,16 @@ function renderCategoriesList() {
   categories.forEach(cat => {
     const row = document.createElement('div');
     row.className = 'category-row';
-    const swatch = document.createElement('span');
-    swatch.className = 'cat-swatch';
-    swatch.style.background = cat.color;
-    const name = document.createElement('span');
-    name.className = 'category-row-name';
-    name.textContent = cat.name;
-    const tag = document.createElement('span');
-    tag.className = 'category-row-tag';
-    tag.textContent = customIds.has(cat.id) ? 'Custom' : 'Built-in';
-    row.appendChild(swatch);
-    row.appendChild(name);
-    row.appendChild(tag);
-    if (customIds.has(cat.id)) {
+    const isCustom = customIds.has(cat.id);
+    row.innerHTML = `
+      <span class="cat-dot" style="background:${cat.color}"></span>
+      <span class="category-row-name">${cat.name}</span>
+      <span class="category-row-tag">${isCustom ? 'Custom' : 'Built-in'}</span>
+    `;
+    if (isCustom) {
       const del = document.createElement('button');
-      del.className = 'delete-btn';
-      del.title = 'Delete category';
-      del.textContent = '✕';
+      del.className = 'recent-icon-btn';
+      del.textContent = 'Remove';
       del.addEventListener('click', () => deleteCustomCategory(cat.id));
       row.appendChild(del);
     }
@@ -1046,10 +1329,7 @@ async function submitAddCategory(e) {
   err.classList.add('hidden');
 
   const name = input.value.trim();
-  if (!name) {
-    input.classList.add('invalid');
-    return;
-  }
+  if (!name) { input.classList.add('invalid'); return; }
   input.classList.remove('invalid');
 
   const baseId = 'custom_' + name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
@@ -1060,7 +1340,6 @@ async function submitAddCategory(e) {
   }
 
   const category = { id: baseId || ('custom_' + uid().slice(0, 8)), name, color: pickedColor };
-
   btn.disabled = true;
   btn.textContent = 'Adding…';
   try {
@@ -1069,9 +1348,7 @@ async function submitAddCategory(e) {
     cache.categories.push(category);
     rebuildCategories();
     input.value = '';
-    renderBudgetsList();
-    renderCategoriesList();
-    buildCategoryPills();
+    renderBudgetsPage();
   } catch (e2) {
     err.textContent = 'Could not add: ' + e2.message;
     err.classList.remove('hidden');
@@ -1090,104 +1367,68 @@ async function deleteCustomCategory(id) {
     if (cache.receipts) cache.receipts.forEach(r => { if (r.category === id) r.category = 'other'; });
     if (cache.items) cache.items.forEach(it => { if (it.category === id) it.category = 'other'; });
     rebuildCategories();
-    renderBudgetsList();
-    renderCategoriesList();
-    buildCategoryPills();
+    renderBudgetsPage();
   } catch (e) {
-    alert('Delete failed: ' + e.message);
+    showToast('Delete failed: ' + e.message, { error: true });
   }
 }
 
-// ── Dashboard: budgets vs spend ────────────────────────────
+// ── Settings ──────────────────────────────────────────────
 
-function currentMonthKey(d) {
-  const dt = d ? new Date(d) : new Date();
-  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0');
-}
-
-function monthLabel() {
-  return new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' });
-}
-
-function renderBudgetProgress(receipts) {
-  const container = document.getElementById('budget-progress-list');
-  const empty = document.getElementById('budget-empty');
-  const subEl = document.getElementById('budget-card-sub');
-  if (!container) return;
-  container.innerHTML = '';
-
-  const budgets = getBudgetMap();
-  const budgetCats = Object.keys(budgets);
-
-  if (subEl) subEl.textContent = monthLabel();
-
-  if (budgetCats.length === 0) {
-    empty.classList.remove('hidden');
-    return;
+async function confirmClearAll() {
+  if (!confirm('Permanently delete ALL receipts and items from your Google Sheet? This cannot be undone.')) return;
+  try {
+    await apiPost({ action: 'clear' });
+    cache.receipts = [];
+    cache.items = [];
+    showDataStatus('All data cleared.');
+    renderCurrent();
+  } catch (e) {
+    showDataStatus('Clear failed: ' + e.message, true);
   }
-  empty.classList.add('hidden');
-
-  const thisMonth = currentMonthKey();
-  const spend = {};
-  receipts.forEach(r => {
-    if (!r.date) return;
-    if (currentMonthKey(r.date) !== thisMonth) return;
-    const amt = parseFloat(r.total);
-    if (isNaN(amt)) return;
-    const cat = r.category || 'other';
-    spend[cat] = (spend[cat] || 0) + amt;
-  });
-
-  budgetCats.forEach(catId => {
-    const cat = categories.find(c => c.id === catId);
-    if (!cat) return;
-    const budget = budgets[catId];
-    const used = spend[catId] || 0;
-    const pct = budget > 0 ? Math.min(100, (used / budget) * 100) : 0;
-    const overPct = budget > 0 ? (used / budget) * 100 : 0;
-    const isOver = used > budget;
-
-    const row = document.createElement('div');
-    row.className = 'budget-progress-row' + (isOver ? ' over' : '');
-
-    const top = document.createElement('div');
-    top.className = 'budget-progress-top';
-    top.innerHTML = `
-      <span class="budget-progress-name">
-        <span class="cat-swatch" style="background:${cat.color}"></span>${cat.name}
-      </span>
-      <span class="budget-progress-amounts">
-        <strong>${fmt(used)}</strong> <span class="budget-of">of ${fmt(budget)}</span>
-      </span>
-    `;
-
-    const barWrap = document.createElement('div');
-    barWrap.className = 'budget-bar';
-    const bar = document.createElement('div');
-    bar.className = 'budget-bar-fill';
-    bar.style.width = pct + '%';
-    bar.style.background = isOver ? '#ef4444' : (overPct >= 80 ? '#f59e0b' : cat.color);
-    barWrap.appendChild(bar);
-
-    const foot = document.createElement('div');
-    foot.className = 'budget-progress-foot';
-    if (isOver) {
-      foot.innerHTML = `<span class="budget-over-tag">Over by ${fmt(used - budget)}</span>`;
-    } else {
-      foot.innerHTML = `<span class="budget-remaining">${fmt(budget - used)} left</span> · <span class="budget-pct">${overPct.toFixed(0)}%</span>`;
-    }
-
-    row.appendChild(top);
-    row.appendChild(barWrap);
-    row.appendChild(foot);
-    container.appendChild(row);
-  });
 }
 
 function showDataStatus(msg, isError) {
   const el = document.getElementById('data-status');
   el.textContent = msg;
+  el.style.color = isError ? 'var(--red)' : 'var(--accent)';
   el.classList.remove('hidden');
-  el.classList.toggle('error', !!isError);
   setTimeout(() => el.classList.add('hidden'), 4000);
+}
+
+// ── Toast ─────────────────────────────────────────────────
+
+function showToast(msg, opts) {
+  opts = opts || {};
+  const root = document.getElementById('toast-root');
+  const node = document.createElement('div');
+  node.className = 'toast' + (opts.error ? ' error' : '');
+  const msgEl = document.createElement('span');
+  msgEl.textContent = msg;
+  node.appendChild(msgEl);
+  if (opts.undo) {
+    const undoBtn = document.createElement('button');
+    undoBtn.className = 'undo';
+    undoBtn.textContent = 'Undo';
+    undoBtn.addEventListener('click', () => {
+      opts.undo();
+      clearToast();
+    });
+    node.appendChild(undoBtn);
+  }
+  clearToast();
+  root.appendChild(node);
+  toastTimer = setTimeout(clearToast, opts.undo ? 5000 : 3000);
+}
+
+function clearToast() {
+  const root = document.getElementById('toast-root');
+  if (root) root.innerHTML = '';
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+}
+
+// ── Helpers ───────────────────────────────────────────────
+
+function escapeAttr(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
