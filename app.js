@@ -3,12 +3,46 @@
 const SCRIPT_URL_KEY = 'budget-tracker-script-url';
 
 let scriptUrl = localStorage.getItem(SCRIPT_URL_KEY) || '';
-let categories = CATEGORIES;
-let cache = null;           // { receipts, items } from last fetch
+let categories = CATEGORIES.slice();
+let cache = null;           // { receipts, items, budgets, categories } from last fetch
 let pendingFetch = null;    // dedupe concurrent reads
 let categoryChart = null;
 let groceryChart = null;
 let itemCounter = 0;
+
+const CATEGORY_COLOR_PALETTE = [
+  '#22c55e', '#f97316', '#3b82f6', '#8b5cf6', '#ec4899',
+  '#f59e0b', '#14b8a6', '#ef4444', '#0ea5e9', '#a855f7',
+  '#84cc16', '#eab308', '#06b6d4', '#d946ef', '#6b7280',
+];
+
+function rebuildCategories() {
+  const custom = (cache && cache.categories) ? cache.categories : [];
+  const seen = new Set();
+  const merged = [];
+  CATEGORIES.forEach(c => {
+    if (c.id === 'other') return;
+    seen.add(c.id);
+    merged.push(c);
+  });
+  custom.forEach(c => {
+    if (!c || !c.id || seen.has(c.id)) return;
+    seen.add(c.id);
+    merged.push({ id: c.id, name: c.name, color: c.color || '#6b7280', keywords: [] });
+  });
+  const other = CATEGORIES.find(c => c.id === 'other');
+  if (other) merged.push(other);
+  categories = merged;
+}
+
+function getBudgetMap() {
+  const map = {};
+  ((cache && cache.budgets) || []).forEach(b => {
+    const amt = parseFloat(b.amount);
+    if (!isNaN(amt) && amt > 0) map[b.category_id] = amt;
+  });
+  return map;
+}
 
 // ── Boot ───────────────────────────────────────────────────
 
@@ -58,7 +92,13 @@ async function saveScriptUrl() {
     if (!Array.isArray(data.receipts)) throw new Error('Unexpected response shape');
     scriptUrl = url;
     localStorage.setItem(SCRIPT_URL_KEY, url);
-    cache = data;
+    cache = {
+      receipts: data.receipts || [],
+      items: data.items || [],
+      budgets: data.budgets || [],
+      categories: data.categories || [],
+    };
+    rebuildCategories();
     showApp();
   } catch (e) {
     err.textContent = 'Could not reach the script: ' + e.message + '. Double-check the URL and that "Who has access" is set to "Anyone".';
@@ -94,7 +134,10 @@ async function apiGet() {
       cache = {
         receipts: data.receipts || [],
         items: data.items || [],
+        budgets: data.budgets || [],
+        categories: data.categories || [],
       };
+      rebuildCategories();
       setSyncIndicator('ok', 'Synced');
       setTimeout(() => setSyncIndicator('', ''), 1500);
       return cache;
@@ -141,6 +184,8 @@ async function refreshData() {
     const active = document.querySelector('.nav-btn.active')?.dataset.tab;
     if (active === 'dashboard') loadDashboard();
     if (active === 'receipts') loadReceipts();
+    if (active === 'budgets') loadBudgets();
+    if (active === 'add') buildCategoryPills();
   } catch (e) {
     alert('Could not refresh: ' + e.message);
   }
@@ -156,6 +201,7 @@ function showTab(name) {
   });
   if (name === 'dashboard') loadDashboard();
   if (name === 'receipts') loadReceipts();
+  if (name === 'budgets') loadBudgets();
 }
 
 // ── Utilities ──────────────────────────────────────────────
@@ -452,6 +498,7 @@ async function loadDashboard() {
 
   renderCategoryChart(dash.spend_by_category);
   renderGroceryChart(dash.grocery_over_time);
+  renderBudgetProgress(data.receipts);
 }
 
 function renderCategoryChart(spendByCategory) {
@@ -595,40 +642,144 @@ async function loadReceipts() {
 
   const tbody = table.querySelector('tbody');
   sorted.forEach(receipt => {
-    const tr = document.createElement('tr');
+    tbody.appendChild(buildReceiptRow(receipt));
+  });
+}
 
+function buildReceiptRow(receipt) {
+  const tr = document.createElement('tr');
+  tr.dataset.receiptId = receipt.id;
+  renderReceiptRow(tr, receipt, false);
+  return tr;
+}
+
+function renderReceiptRow(tr, receipt, editing) {
+  tr.innerHTML = '';
+  if (editing) {
     const dateTd = document.createElement('td');
-    dateTd.textContent = receipt.date;
+    const dateInput = document.createElement('input');
+    dateInput.type = 'date';
+    dateInput.className = 'row-edit-input';
+    dateInput.value = receipt.date || '';
+    dateTd.appendChild(dateInput);
 
     const storeTd = document.createElement('td');
-    storeTd.textContent = receipt.store;
+    const storeInput = document.createElement('input');
+    storeInput.type = 'text';
+    storeInput.className = 'row-edit-input';
+    storeInput.value = receipt.store || '';
+    storeTd.appendChild(storeInput);
 
     const totalTd = document.createElement('td');
-    totalTd.textContent = fmt(receipt.total);
+    const totalWrap = document.createElement('span');
+    totalWrap.className = 'row-edit-total';
+    const dollar = document.createElement('span');
+    dollar.textContent = '$';
+    dollar.className = 'row-edit-dollar';
+    const totalInput = document.createElement('input');
+    totalInput.type = 'number';
+    totalInput.step = '0.01';
+    totalInput.min = '0';
+    totalInput.className = 'row-edit-input';
+    totalInput.value = receipt.total != null ? receipt.total : '';
+    totalWrap.appendChild(dollar);
+    totalWrap.appendChild(totalInput);
+    totalTd.appendChild(totalWrap);
 
     const catTd = document.createElement('td');
-    catTd.appendChild(makeCategorySelect(receipt.category, val => {
-      updateReceiptCategory(receipt.id, val);
-    }));
+    const catSel = makeCategorySelect(receipt.category, () => {});
+    catTd.appendChild(catSel);
 
-    const expandTd = document.createElement('td');
-    const expandBtn = document.createElement('button');
-    expandBtn.className = 'expand-btn';
-    expandBtn.textContent = 'Items';
-    expandBtn.addEventListener('click', () => toggleItems(expandBtn, receipt.id, tr));
-    expandTd.appendChild(expandBtn);
+    const saveTd = document.createElement('td');
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'expand-btn save';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', async () => {
+      const updates = {
+        date: dateInput.value,
+        store: storeInput.value.trim(),
+        total: Math.round(parseFloat(totalInput.value) * 100) / 100,
+        category: catSel.value,
+      };
+      if (!updates.store || !updates.date || isNaN(updates.total) || updates.total < 0) {
+        alert('Please fill in store, date, and a valid total.');
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        await saveReceiptEdits(receipt.id, updates);
+        const updated = cache.receipts.find(r => r.id === receipt.id) || receipt;
+        renderReceiptRow(tr, updated, false);
+      } catch (e) {
+        alert('Update failed: ' + e.message);
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+      }
+    });
+    saveTd.appendChild(saveBtn);
 
-    const deleteTd = document.createElement('td');
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'delete-btn';
-    deleteBtn.title = 'Delete receipt';
-    deleteBtn.textContent = '✕';
-    deleteBtn.addEventListener('click', () => deleteReceipt(receipt.id, tr));
-    deleteTd.appendChild(deleteBtn);
+    const cancelTd = document.createElement('td');
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'delete-btn';
+    cancelBtn.title = 'Cancel';
+    cancelBtn.textContent = '✕';
+    cancelBtn.addEventListener('click', () => renderReceiptRow(tr, receipt, false));
+    cancelTd.appendChild(cancelBtn);
 
-    [dateTd, storeTd, totalTd, catTd, expandTd, deleteTd].forEach(td => tr.appendChild(td));
-    tbody.appendChild(tr);
+    [dateTd, storeTd, totalTd, catTd, saveTd, cancelTd].forEach(td => tr.appendChild(td));
+    storeInput.focus();
+    return;
+  }
+
+  const dateTd = document.createElement('td');
+  dateTd.textContent = receipt.date;
+
+  const storeTd = document.createElement('td');
+  storeTd.textContent = receipt.store;
+
+  const totalTd = document.createElement('td');
+  totalTd.textContent = fmt(receipt.total);
+
+  const catTd = document.createElement('td');
+  catTd.appendChild(makeCategorySelect(receipt.category, val => {
+    updateReceiptCategory(receipt.id, val);
+  }));
+
+  const actionsTd = document.createElement('td');
+  actionsTd.className = 'row-actions';
+  const editBtn = document.createElement('button');
+  editBtn.className = 'expand-btn';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', () => {
+    const existing = document.getElementById(`items-row-${receipt.id}`);
+    if (existing) existing.remove();
+    renderReceiptRow(tr, receipt, true);
   });
+  const expandBtn = document.createElement('button');
+  expandBtn.className = 'expand-btn';
+  expandBtn.textContent = 'Items';
+  expandBtn.addEventListener('click', () => toggleItems(expandBtn, receipt.id, tr));
+  actionsTd.appendChild(editBtn);
+  actionsTd.appendChild(expandBtn);
+
+  const deleteTd = document.createElement('td');
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'delete-btn';
+  deleteBtn.title = 'Delete receipt';
+  deleteBtn.textContent = '✕';
+  deleteBtn.addEventListener('click', () => deleteReceipt(receipt.id, tr));
+  deleteTd.appendChild(deleteBtn);
+
+  [dateTd, storeTd, totalTd, catTd, actionsTd, deleteTd].forEach(td => tr.appendChild(td));
+}
+
+async function saveReceiptEdits(receiptId, updates) {
+  await apiPost({ action: 'update_receipt', id: receiptId, updates });
+  if (cache) {
+    const r = cache.receipts.find(r => r.id === receiptId);
+    if (r) Object.assign(r, updates);
+  }
 }
 
 async function updateReceiptCategory(receiptId, category) {
@@ -743,6 +894,294 @@ async function confirmClearAll() {
   } catch (e) {
     showDataStatus('Clear failed: ' + e.message, true);
   }
+}
+
+// ── Budgets Tab ────────────────────────────────────────────
+
+async function loadBudgets() {
+  try {
+    await getData();
+  } catch (e) {
+    return;
+  }
+  renderBudgetsList();
+  renderCategoriesList();
+  renderColorPicker();
+}
+
+function renderBudgetsList() {
+  const container = document.getElementById('budgets-list');
+  if (!container) return;
+  container.innerHTML = '';
+  const budgets = getBudgetMap();
+
+  categories.forEach(cat => {
+    const row = document.createElement('div');
+    row.className = 'budget-row';
+
+    const swatch = document.createElement('span');
+    swatch.className = 'cat-swatch';
+    swatch.style.background = cat.color;
+
+    const name = document.createElement('span');
+    name.className = 'budget-row-name';
+    name.textContent = cat.name;
+
+    const inputWrap = document.createElement('div');
+    inputWrap.className = 'budget-input-wrap';
+    const dollar = document.createElement('span');
+    dollar.className = 'budget-dollar';
+    dollar.textContent = '$';
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '0';
+    input.step = '0.01';
+    input.placeholder = '0.00';
+    input.className = 'budget-input';
+    input.value = budgets[cat.id] != null ? budgets[cat.id] : '';
+    input.addEventListener('change', () => saveBudget(cat.id, input.value, input));
+    inputWrap.appendChild(dollar);
+    inputWrap.appendChild(input);
+
+    const status = document.createElement('span');
+    status.className = 'budget-row-status';
+
+    row.appendChild(swatch);
+    row.appendChild(name);
+    row.appendChild(inputWrap);
+    row.appendChild(status);
+    container.appendChild(row);
+  });
+}
+
+async function saveBudget(categoryId, rawValue, inputEl) {
+  const trimmed = String(rawValue).trim();
+  const amount = trimmed === '' ? 0 : parseFloat(trimmed);
+  if (isNaN(amount) || amount < 0) {
+    inputEl.classList.add('invalid');
+    return;
+  }
+  inputEl.classList.remove('invalid');
+  const statusEl = inputEl.parentElement.nextElementSibling;
+  if (statusEl) statusEl.textContent = 'Saving…';
+  try {
+    await apiPost({ action: 'set_budget', category_id: categoryId, amount });
+    if (!cache.budgets) cache.budgets = [];
+    const existing = cache.budgets.find(b => b.category_id === categoryId);
+    if (amount > 0) {
+      if (existing) existing.amount = amount;
+      else cache.budgets.push({ category_id: categoryId, amount });
+    } else if (existing) {
+      cache.budgets = cache.budgets.filter(b => b.category_id !== categoryId);
+    }
+    if (statusEl) {
+      statusEl.textContent = 'Saved';
+      setTimeout(() => { if (statusEl.textContent === 'Saved') statusEl.textContent = ''; }, 1500);
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = 'Failed';
+    alert('Could not save budget: ' + e.message);
+  }
+}
+
+function renderCategoriesList() {
+  const container = document.getElementById('categories-list');
+  if (!container) return;
+  container.innerHTML = '';
+  const customIds = new Set(((cache && cache.categories) || []).map(c => c.id));
+
+  categories.forEach(cat => {
+    const row = document.createElement('div');
+    row.className = 'category-row';
+    const swatch = document.createElement('span');
+    swatch.className = 'cat-swatch';
+    swatch.style.background = cat.color;
+    const name = document.createElement('span');
+    name.className = 'category-row-name';
+    name.textContent = cat.name;
+    const tag = document.createElement('span');
+    tag.className = 'category-row-tag';
+    tag.textContent = customIds.has(cat.id) ? 'Custom' : 'Built-in';
+    row.appendChild(swatch);
+    row.appendChild(name);
+    row.appendChild(tag);
+    if (customIds.has(cat.id)) {
+      const del = document.createElement('button');
+      del.className = 'delete-btn';
+      del.title = 'Delete category';
+      del.textContent = '✕';
+      del.addEventListener('click', () => deleteCustomCategory(cat.id));
+      row.appendChild(del);
+    }
+    container.appendChild(row);
+  });
+}
+
+let pickedColor = CATEGORY_COLOR_PALETTE[0];
+
+function renderColorPicker() {
+  const container = document.getElementById('new-cat-color-picker');
+  if (!container) return;
+  container.innerHTML = '';
+  pickedColor = CATEGORY_COLOR_PALETTE[0];
+  CATEGORY_COLOR_PALETTE.forEach((color, i) => {
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = 'color-dot' + (i === 0 ? ' active' : '');
+    dot.style.background = color;
+    dot.addEventListener('click', () => {
+      pickedColor = color;
+      container.querySelectorAll('.color-dot').forEach(d => d.classList.remove('active'));
+      dot.classList.add('active');
+    });
+    container.appendChild(dot);
+  });
+}
+
+async function submitAddCategory(e) {
+  e.preventDefault();
+  const input = document.getElementById('new-cat-name');
+  const err = document.getElementById('new-cat-error');
+  const btn = document.getElementById('new-cat-submit');
+  err.classList.add('hidden');
+
+  const name = input.value.trim();
+  if (!name) {
+    input.classList.add('invalid');
+    return;
+  }
+  input.classList.remove('invalid');
+
+  const baseId = 'custom_' + name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  if (categories.some(c => c.id === baseId || c.name.toLowerCase() === name.toLowerCase())) {
+    err.textContent = 'A category with that name already exists.';
+    err.classList.remove('hidden');
+    return;
+  }
+
+  const category = { id: baseId || ('custom_' + uid().slice(0, 8)), name, color: pickedColor };
+
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  try {
+    await apiPost({ action: 'add_category', category });
+    if (!cache.categories) cache.categories = [];
+    cache.categories.push(category);
+    rebuildCategories();
+    input.value = '';
+    renderBudgetsList();
+    renderCategoriesList();
+    buildCategoryPills();
+  } catch (e2) {
+    err.textContent = 'Could not add: ' + e2.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add Category';
+  }
+}
+
+async function deleteCustomCategory(id) {
+  if (!confirm('Delete this category? Receipts in it will be moved to "Other".')) return;
+  try {
+    await apiPost({ action: 'delete_category', id });
+    if (cache.categories) cache.categories = cache.categories.filter(c => c.id !== id);
+    if (cache.budgets) cache.budgets = cache.budgets.filter(b => b.category_id !== id);
+    if (cache.receipts) cache.receipts.forEach(r => { if (r.category === id) r.category = 'other'; });
+    if (cache.items) cache.items.forEach(it => { if (it.category === id) it.category = 'other'; });
+    rebuildCategories();
+    renderBudgetsList();
+    renderCategoriesList();
+    buildCategoryPills();
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+// ── Dashboard: budgets vs spend ────────────────────────────
+
+function currentMonthKey(d) {
+  const dt = d ? new Date(d) : new Date();
+  return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0');
+}
+
+function monthLabel() {
+  return new Date().toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+
+function renderBudgetProgress(receipts) {
+  const container = document.getElementById('budget-progress-list');
+  const empty = document.getElementById('budget-empty');
+  const subEl = document.getElementById('budget-card-sub');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const budgets = getBudgetMap();
+  const budgetCats = Object.keys(budgets);
+
+  if (subEl) subEl.textContent = monthLabel();
+
+  if (budgetCats.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  const thisMonth = currentMonthKey();
+  const spend = {};
+  receipts.forEach(r => {
+    if (!r.date) return;
+    if (currentMonthKey(r.date) !== thisMonth) return;
+    const amt = parseFloat(r.total);
+    if (isNaN(amt)) return;
+    const cat = r.category || 'other';
+    spend[cat] = (spend[cat] || 0) + amt;
+  });
+
+  budgetCats.forEach(catId => {
+    const cat = categories.find(c => c.id === catId);
+    if (!cat) return;
+    const budget = budgets[catId];
+    const used = spend[catId] || 0;
+    const pct = budget > 0 ? Math.min(100, (used / budget) * 100) : 0;
+    const overPct = budget > 0 ? (used / budget) * 100 : 0;
+    const isOver = used > budget;
+
+    const row = document.createElement('div');
+    row.className = 'budget-progress-row' + (isOver ? ' over' : '');
+
+    const top = document.createElement('div');
+    top.className = 'budget-progress-top';
+    top.innerHTML = `
+      <span class="budget-progress-name">
+        <span class="cat-swatch" style="background:${cat.color}"></span>${cat.name}
+      </span>
+      <span class="budget-progress-amounts">
+        <strong>${fmt(used)}</strong> <span class="budget-of">of ${fmt(budget)}</span>
+      </span>
+    `;
+
+    const barWrap = document.createElement('div');
+    barWrap.className = 'budget-bar';
+    const bar = document.createElement('div');
+    bar.className = 'budget-bar-fill';
+    bar.style.width = pct + '%';
+    bar.style.background = isOver ? '#ef4444' : (overPct >= 80 ? '#f59e0b' : cat.color);
+    barWrap.appendChild(bar);
+
+    const foot = document.createElement('div');
+    foot.className = 'budget-progress-foot';
+    if (isOver) {
+      foot.innerHTML = `<span class="budget-over-tag">Over by ${fmt(used - budget)}</span>`;
+    } else {
+      foot.innerHTML = `<span class="budget-remaining">${fmt(budget - used)} left</span> · <span class="budget-pct">${overPct.toFixed(0)}%</span>`;
+    }
+
+    row.appendChild(top);
+    row.appendChild(barWrap);
+    row.appendChild(foot);
+    container.appendChild(row);
+  });
 }
 
 function showDataStatus(msg, isError) {

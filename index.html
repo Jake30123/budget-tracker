@@ -43,6 +43,7 @@
       <li><button class="nav-btn active" data-tab="add" onclick="showTab('add')">Add Receipt</button></li>
       <li><button class="nav-btn" data-tab="dashboard" onclick="showTab('dashboard')">Dashboard</button></li>
       <li><button class="nav-btn" data-tab="receipts" onclick="showTab('receipts')">Receipts</button></li>
+      <li><button class="nav-btn" data-tab="budgets" onclick="showTab('budgets')">Budgets</button></li>
       <li><button class="nav-btn" data-tab="settings" onclick="showTab('settings')">Settings</button></li>
     </ul>
     <div class="sync-indicator" id="sync-indicator"></div>
@@ -76,7 +77,6 @@
           <div class="form-section">
             <div class="section-header">
               <span class="section-title">Items <span class="optional-tag">optional</span></span>
-              <button type="button" class="btn-add-item" onclick="addFormItem()">+ Add Item</button>
             </div>
             <div id="items-area">
               <p id="no-items-hint" class="no-items-hint">No items yet — or skip this and just enter the total below.</p>
@@ -92,6 +92,9 @@
                 </thead>
                 <tbody id="form-items-body"></tbody>
               </table>
+              <div class="items-add-row">
+                <button type="button" class="btn-add-item" onclick="addFormItem()">+ Add Item</button>
+              </div>
             </div>
           </div>
 
@@ -151,6 +154,17 @@
         </div>
       </div>
 
+      <div class="budget-card" id="dashboard-budgets">
+        <div class="budget-card-header">
+          <h3 id="budget-card-title">Budgets — this month</h3>
+          <span class="budget-card-sub" id="budget-card-sub"></span>
+        </div>
+        <div id="budget-progress-list"></div>
+        <p class="budget-empty hidden" id="budget-empty">
+          No budgets set yet. <a href="#" onclick="showTab('budgets'); return false;">Set one up →</a>
+        </p>
+      </div>
+
       <div class="charts-grid">
         <div class="chart-card">
           <h3>Spending by Category</h3>
@@ -177,6 +191,42 @@
       </div>
       <div id="receipts-container">
         <p class="empty-state">No receipts yet. Add one to get started.</p>
+      </div>
+    </section>
+
+    <!-- Budgets Tab -->
+    <section id="tab-budgets" class="tab hidden">
+      <div class="tab-header">
+        <h2>Budgets</h2>
+        <button class="btn-refresh" onclick="refreshData()" title="Refresh from sheet">↻</button>
+      </div>
+
+      <div class="budget-card">
+        <h3 class="settings-h3">Monthly budget by category</h3>
+        <p class="data-note">Set a monthly target for each category. Leave blank or zero to remove the budget.</p>
+        <div id="budgets-list"></div>
+      </div>
+
+      <div class="budget-card">
+        <h3 class="settings-h3">Categories</h3>
+        <p class="data-note">Add your own categories. Built-in categories can't be removed; custom ones can.</p>
+        <div id="categories-list"></div>
+        <form class="add-category-form" onsubmit="submitAddCategory(event)">
+          <div class="form-row">
+            <div class="form-field grow">
+              <label for="new-cat-name">New category</label>
+              <input id="new-cat-name" type="text" placeholder="e.g. Subscriptions" autocomplete="off" required>
+            </div>
+            <div class="form-field">
+              <label>Color</label>
+              <div id="new-cat-color-picker" class="color-picker"></div>
+            </div>
+          </div>
+          <p id="new-cat-error" class="form-error hidden"></p>
+          <div class="form-actions">
+            <button type="submit" class="btn-save" id="new-cat-submit">Add Category</button>
+          </div>
+        </form>
       </div>
     </section>
 
