@@ -187,8 +187,9 @@ function buildNav() {
   const items = [
     { id: 'dashboard',    label: 'Overview',     kbd: '1' },
     { id: 'transactions', label: 'Transactions', kbd: '2' },
-    { id: 'budgets',      label: 'Budgets',      kbd: '3' },
-    { id: 'settings',     label: 'Settings',     kbd: '4' },
+    { id: 'income',       label: 'Income',       kbd: '3' },
+    { id: 'budgets',      label: 'Budgets',      kbd: '4' },
+    { id: 'settings',     label: 'Settings',     kbd: '5' },
   ];
   nav.innerHTML = '';
   items.forEach(it => {
@@ -251,6 +252,8 @@ async function saveScriptUrl() {
       items: data.items || [],
       budgets: data.budgets || [],
       categories: data.categories || [],
+      income: data.income || [],
+      settings: data.settings || [],
     };
     rebuildCategories();
     showApp();
@@ -290,6 +293,8 @@ async function apiGet() {
         items: data.items || [],
         budgets: data.budgets || [],
         categories: data.categories || [],
+        income: data.income || [],
+        settings: data.settings || [],
       };
       rebuildCategories();
       setSyncIndicator('ok', 'Synced');
@@ -355,7 +360,9 @@ function showTab(name) {
 function renderCurrent() {
   if (currentPage === 'dashboard') renderDashboard();
   else if (currentPage === 'transactions') renderTransactionsPage();
+  else if (currentPage === 'income') renderIncomePage();
   else if (currentPage === 'budgets') renderBudgetsPage();
+  else if (currentPage === 'settings') renderSettingsPage();
 }
 
 // ── Hotkeys ────────────────────────────────────────────────
@@ -371,8 +378,9 @@ function bindGlobalHotkeys() {
     }
     if (e.key === '1') showTab('dashboard');
     if (e.key === '2') showTab('transactions');
-    if (e.key === '3') showTab('budgets');
-    if (e.key === '4') showTab('settings');
+    if (e.key === '3') showTab('income');
+    if (e.key === '4') showTab('budgets');
+    if (e.key === '5') showTab('settings');
   });
 }
 
@@ -446,7 +454,7 @@ async function commitQuickAdd() {
 
   input.value = '';
   updateQuickbarPreview();
-  if (!cache) cache = { receipts: [], items: [], budgets: [], categories: [] };
+  if (!cache) cache = { receipts: [], items: [], budgets: [], categories: [], income: [], settings: [] };
   cache.receipts.push(receipt);
   renderDashboard();
 
@@ -514,9 +522,94 @@ function renderDashboard() {
   document.getElementById('hero-month-label').textContent = range.monthName;
 
   renderHero(stats.total, totalBudget, range);
+  renderSavingsCard(stats.total, range);
   renderCatGrid(stats.spendByCat, budgets, range);
   renderHeatmap(stats.monthReceipts, range);
   renderRecent(stats.monthReceipts);
+}
+
+function monthIncome(range) {
+  return ((cache && cache.income) || []).reduce((sum, e) => {
+    if (!isThisMonth(e.date, range)) return sum;
+    const amt = parseFloat(e.amount);
+    return isNaN(amt) ? sum : sum + amt;
+  }, 0);
+}
+
+function getSetting(key) {
+  const row = ((cache && cache.settings) || []).find(s => s.key === key);
+  return row ? row.value : '';
+}
+
+function renderSavingsCard(totalSpent, range) {
+  const income = monthIncome(range);
+  const saved = income - totalSpent;
+  const rate = income > 0 ? saved / income : 0;
+  const targetRaw = parseFloat(getSetting('savings_target_pct'));
+  const target = isNaN(targetRaw) ? 0 : Math.max(0, targetRaw) / 100;
+
+  document.getElementById('savings-month-label').textContent = range.monthName;
+  document.getElementById('savings-meta').textContent =
+    target > 0 ? `TARGET ${Math.round(target * 100)}%` : 'SET A TARGET IN SETTINGS';
+
+  const pctEl = document.getElementById('savings-pct');
+  const overspent = income > 0 && saved < 0;
+  const meetingTarget = income > 0 && target > 0 && rate >= target;
+  const noIncome = income <= 0;
+
+  let stateClass = '';
+  if (overspent) stateClass = ' red';
+  else if (target > 0 && !meetingTarget) stateClass = ' amber';
+  pctEl.className = 'hero-num' + stateClass;
+
+  if (noIncome) {
+    pctEl.innerHTML = `<span style="font-size:32px;color:var(--ink-3);font-family:var(--font-sans);letter-spacing:0">No income logged yet</span>`;
+  } else {
+    const shown = Math.round(rate * 100);
+    pctEl.textContent = shown + '%';
+  }
+
+  const bar = document.getElementById('savings-progress');
+  bar.className = 'pace-spent' + stateClass;
+  bar.style.width = Math.min(Math.max(rate, 0), 1) * 100 + '%';
+
+  const marker = document.getElementById('savings-target-marker');
+  if (target > 0) {
+    marker.style.display = '';
+    marker.style.left = Math.min(target, 1) * 100 + '%';
+  } else {
+    marker.style.display = 'none';
+  }
+
+  document.getElementById('savings-progress-label').textContent =
+    noIncome ? '—' : `${fmt(Math.max(saved, 0), { whole: true })} of ${fmt(income, { whole: true })} saved`;
+
+  const status = document.getElementById('savings-status');
+  if (noIncome) {
+    status.className = 'pace-status';
+    status.textContent = '';
+  } else if (overspent) {
+    status.className = 'pace-status over';
+    status.textContent = `${fmt(-saved, { whole: true })} over income`;
+  } else if (target > 0 && meetingTarget) {
+    status.className = 'pace-status ok';
+    status.textContent = `On target`;
+  } else if (target > 0) {
+    const gap = (target - rate) * 100;
+    status.className = 'pace-status warn';
+    status.textContent = `${gap.toFixed(1)}% short`;
+  } else {
+    status.className = 'pace-status ok';
+    status.textContent = `${Math.round(rate * 100)}% saved`;
+  }
+
+  document.getElementById('savings-income').textContent = income > 0 ? fmt(income) : '—';
+  document.getElementById('savings-spent').textContent = fmt(totalSpent);
+  const amt = document.getElementById('savings-amount');
+  amt.textContent = noIncome ? '—' : fmt(saved);
+  amt.className = 'val' + (overspent ? ' red' : '');
+  document.getElementById('savings-target-label').textContent =
+    target > 0 ? Math.round(target * 100) + '%' : '—';
 }
 
 function renderHero(totalSpent, totalBudget, range) {
@@ -868,6 +961,206 @@ function renderTransactionsPage() {
     byDate[dateStr].forEach(r => wrap.appendChild(buildReceiptRow(r)));
   });
   container.appendChild(wrap);
+}
+
+// ── Income page ───────────────────────────────────────────
+
+function renderIncomePage() {
+  if (!cache) return;
+  const range = monthRange();
+  const income = (cache && cache.income) || [];
+  const thisMonthEntries = income.filter(e => isThisMonth(e.date, range));
+  const thisMonthTotal = thisMonthEntries.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+
+  document.getElementById('income-sub').textContent =
+    income.length === 0
+      ? 'Nothing logged yet.'
+      : `${fmt(thisMonthTotal)} this month · ${income.length} total`;
+
+  const container = document.getElementById('income-list');
+  container.innerHTML = '';
+
+  if (income.length === 0) {
+    container.innerHTML = `
+      <div class="recent">
+        <div class="recent-empty">
+          <div class="ttl">No income yet.</div>
+          <div>Click "+ Add income" to log a paycheck or other inflow.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const sorted = [...income].sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || ''))
+  );
+
+  const byDate = {};
+  sorted.forEach(e => { (byDate[e.date] = byDate[e.date] || []).push(e); });
+
+  const wrap = document.createElement('div');
+  wrap.className = 'recent';
+  Object.keys(byDate).forEach(dateStr => {
+    const d = new Date(dateStr + 'T00:00:00');
+    const dayTotal = byDate[dateStr].reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+    const header = document.createElement('div');
+    header.className = 'day-group';
+    header.innerHTML = `<span>${d.toLocaleString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })}</span><span>${fmt(dayTotal)}</span>`;
+    wrap.appendChild(header);
+    byDate[dateStr].forEach(e => wrap.appendChild(buildIncomeRow(e)));
+  });
+  container.appendChild(wrap);
+}
+
+function buildIncomeRow(e) {
+  const d = new Date(e.date + 'T00:00:00');
+  const row = document.createElement('div');
+  row.className = 'recent-row';
+  row.dataset.id = e.id;
+
+  const dayCell = document.createElement('div');
+  dayCell.className = 'recent-day';
+  dayCell.innerHTML = `<span>${d.getDate()}</span><span class="mo">${d.toLocaleString('en-US', { month: 'short' })}</span>`;
+
+  const sourceCell = document.createElement('div');
+  sourceCell.className = 'recent-store';
+  sourceCell.textContent = e.source || '—';
+
+  const spacer = document.createElement('div');
+
+  const amtCell = document.createElement('div');
+  amtCell.className = 'recent-amount';
+  amtCell.textContent = fmt(e.amount);
+
+  const actCell = document.createElement('div');
+  actCell.className = 'recent-actions';
+  const editBtn = document.createElement('button');
+  editBtn.className = 'recent-icon-btn';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', () => openIncomeModal(e));
+  actCell.appendChild(editBtn);
+
+  const delCell = document.createElement('div');
+  const delBtn = document.createElement('button');
+  delBtn.className = 'recent-delete';
+  delBtn.title = 'Delete';
+  delBtn.textContent = '×';
+  delBtn.addEventListener('click', () => deleteIncomeEntry(e));
+  delCell.appendChild(delBtn);
+
+  [dayCell, sourceCell, spacer, amtCell, actCell, delCell].forEach(el => row.appendChild(el));
+  return row;
+}
+
+function openIncomeModal(existing) {
+  const editing = !!existing;
+  const entry = existing || { id: uid(), date: todayISO(), source: '', amount: '' };
+
+  const card = openModal(`
+    <h3>${editing ? 'Edit income' : 'Add income'}</h3>
+    <div class="modal-sub">${editing ? 'Update any field and save.' : 'Log a paycheck or other inflow.'}</div>
+    <div class="modal-fields">
+      <div class="field">
+        <label>Source</label>
+        <input id="im-source" type="text" value="${escapeAttr(entry.source)}" placeholder="Paycheck, freelance, etc." />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>Amount</label>
+          <div class="field-money">
+            <span class="dollar">$</span>
+            <input id="im-amount" type="number" step="0.01" min="0" placeholder="0.00" value="${entry.amount != null ? entry.amount : ''}" />
+          </div>
+        </div>
+        <div class="field">
+          <label>Date</label>
+          <input id="im-date" type="date" value="${entry.date || todayISO()}" />
+        </div>
+      </div>
+      <p id="im-error" class="setup-error hidden"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="im-save">${editing ? 'Save changes' : 'Add income'}</button>
+    </div>
+  `);
+
+  card.dataset.editing = editing ? '1' : '';
+  card.dataset.id = entry.id;
+
+  document.getElementById('im-save').addEventListener('click', () => commitIncomeModal(card));
+  setTimeout(() => document.getElementById('im-source').focus(), 0);
+}
+
+async function commitIncomeModal(card) {
+  const editing = card.dataset.editing === '1';
+  const id = card.dataset.id;
+  const source = document.getElementById('im-source').value.trim();
+  const date = document.getElementById('im-date').value;
+  const amount = parseFloat(document.getElementById('im-amount').value);
+  const err = document.getElementById('im-error');
+  err.classList.add('hidden');
+
+  if (!source || !date || isNaN(amount) || amount <= 0) {
+    err.textContent = 'Please fill in source, date, and a positive amount.';
+    err.classList.remove('hidden');
+    return;
+  }
+
+  const rounded = Math.round(amount * 100) / 100;
+  const btn = document.getElementById('im-save');
+  btn.disabled = true;
+  btn.textContent = editing ? 'Saving…' : 'Adding…';
+
+  try {
+    if (editing) {
+      const updates = { date, source, amount: rounded };
+      await apiPost({ action: 'update_income', id, updates });
+      const e = cache.income.find(x => x.id === id);
+      if (e) Object.assign(e, updates);
+      showToast(`Updated ${fmt(rounded)} · ${source}`);
+    } else {
+      const entry = { id, date, source, amount: rounded, uploaded_at: new Date().toISOString() };
+      await apiPost({ action: 'add_income', income: entry });
+      if (!cache.income) cache.income = [];
+      cache.income.push(entry);
+      showToast(`Added ${fmt(rounded)} · ${source}`);
+    }
+    closeModal();
+    renderCurrent();
+  } catch (e) {
+    err.textContent = 'Save failed: ' + e.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = editing ? 'Save changes' : 'Add income';
+  }
+}
+
+async function deleteIncomeEntry(entry) {
+  if (!confirm('Delete this income entry?')) return;
+  const removed = entry;
+  cache.income = (cache.income || []).filter(x => x.id !== entry.id);
+  renderCurrent();
+  try {
+    await apiPost({ action: 'delete_income', id: entry.id });
+    showToast(`Removed ${fmt(removed.amount)} · ${removed.source}`, {
+      undo: async () => {
+        cache.income.push(removed);
+        renderCurrent();
+        try {
+          await apiPost({ action: 'add_income', income: removed });
+        } catch (e) {
+          showToast('Undo failed: ' + e.message, { error: true });
+          refreshData();
+        }
+      }
+    });
+  } catch (e) {
+    cache.income.push(removed);
+    renderCurrent();
+    showToast('Delete failed: ' + e.message, { error: true });
+  }
 }
 
 // ── Receipt mutations ─────────────────────────────────────
@@ -1374,6 +1667,51 @@ async function deleteCustomCategory(id) {
 }
 
 // ── Settings ──────────────────────────────────────────────
+
+function renderSettingsPage() {
+  if (!cache) return;
+  const input = document.getElementById('settings-savings-target');
+  if (!input) return;
+  const current = parseFloat(getSetting('savings_target_pct'));
+  input.value = isNaN(current) ? '' : current;
+  if (input.dataset.bound !== '1') {
+    input.dataset.bound = '1';
+    input.addEventListener('blur', () => commitSavingsTarget(input.value));
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
+  }
+}
+
+async function commitSavingsTarget(raw) {
+  const trimmed = String(raw).trim();
+  const status = document.getElementById('savings-target-status');
+  status.classList.add('hidden');
+  let value = '';
+  if (trimmed !== '') {
+    const n = parseFloat(trimmed);
+    if (isNaN(n) || n < 0 || n > 100) {
+      status.textContent = 'Enter a number between 0 and 100.';
+      status.classList.remove('hidden');
+      return;
+    }
+    value = n;
+  }
+  if (!cache.settings) cache.settings = [];
+  const row = cache.settings.find(s => s.key === 'savings_target_pct');
+  if (value === '') {
+    cache.settings = cache.settings.filter(s => s.key !== 'savings_target_pct');
+  } else if (row) {
+    row.value = value;
+  } else {
+    cache.settings.push({ key: 'savings_target_pct', value });
+  }
+  try {
+    await apiPost({ action: 'set_setting', key: 'savings_target_pct', value });
+    showToast(value === '' ? 'Savings target cleared' : `Savings target set to ${value}%`);
+  } catch (e) {
+    showToast('Could not save target: ' + e.message, { error: true });
+    refreshData();
+  }
+}
 
 async function confirmClearAll() {
   if (!confirm('Permanently delete ALL receipts and items from your Google Sheet? This cannot be undone.')) return;

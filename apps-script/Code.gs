@@ -14,6 +14,8 @@ const RECEIPT_HEADERS = ['id', 'date', 'store', 'total', 'uploaded_at', 'categor
 const ITEM_HEADERS = ['id', 'receipt_id', 'description', 'quantity', 'unit_price', 'total_price', 'category'];
 const BUDGET_HEADERS = ['category_id', 'amount'];
 const CATEGORY_HEADERS = ['id', 'name', 'color'];
+const INCOME_HEADERS = ['id', 'date', 'source', 'amount', 'uploaded_at'];
+const SETTING_HEADERS = ['key', 'value'];
 
 function getSheet(name, headers) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -53,7 +55,34 @@ function readAll() {
     items: sheetToObjects(getSheet('Items', ITEM_HEADERS), ITEM_HEADERS),
     budgets: sheetToObjects(getSheet('Budgets', BUDGET_HEADERS), BUDGET_HEADERS, 'category_id'),
     categories: sheetToObjects(getSheet('Categories', CATEGORY_HEADERS), CATEGORY_HEADERS),
+    income: sheetToObjects(getSheet('Income', INCOME_HEADERS), INCOME_HEADERS),
+    settings: sheetToObjects(getSheet('Settings', SETTING_HEADERS), SETTING_HEADERS, 'key'),
   };
+}
+
+function appendIncome(entry) {
+  const sh = getSheet('Income', INCOME_HEADERS);
+  sh.appendRow(INCOME_HEADERS.map(h => entry[h] != null ? entry[h] : ''));
+}
+
+function deleteIncome(id) {
+  const sh = getSheet('Income', INCOME_HEADERS);
+  const row = findRow(sh, INCOME_HEADERS.indexOf('id'), id);
+  if (row > 0) sh.deleteRow(row);
+}
+
+function setSetting(key, value) {
+  const sh = getSheet('Settings', SETTING_HEADERS);
+  const row = findRow(sh, SETTING_HEADERS.indexOf('key'), key);
+  if (value == null || value === '') {
+    if (row > 0) sh.deleteRow(row);
+    return;
+  }
+  if (row > 0) {
+    sh.getRange(row, SETTING_HEADERS.indexOf('value') + 1).setValue(value);
+  } else {
+    sh.appendRow([key, value]);
+  }
 }
 
 function appendReceipt(receipt, items) {
@@ -208,6 +237,18 @@ function doPost(e) {
         return json({ ok: true });
       case 'delete_category':
         deleteCategory(body.id);
+        return json({ ok: true });
+      case 'add_income':
+        appendIncome(body.income);
+        return json({ ok: true });
+      case 'update_income':
+        updateRow('Income', INCOME_HEADERS, body.id, body.updates || {});
+        return json({ ok: true });
+      case 'delete_income':
+        deleteIncome(body.id);
+        return json({ ok: true });
+      case 'set_setting':
+        setSetting(body.key, body.value);
         return json({ ok: true });
       default:
         return json({ error: 'Unknown action: ' + body.action });

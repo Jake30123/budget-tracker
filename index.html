@@ -138,6 +138,50 @@
       </section>
 
       <div class="section-h">
+        <h2>Savings</h2>
+        <span class="meta" id="savings-meta"></span>
+      </div>
+      <section class="hero">
+        <div class="hero-card">
+          <div class="eyebrow"><span id="savings-month-label"></span> savings rate</div>
+          <div class="hero-num" id="savings-pct"></div>
+          <div class="pace">
+            <div class="pace-track">
+              <div class="pace-spent" id="savings-progress"></div>
+              <div class="target-marker" id="savings-target-marker"></div>
+            </div>
+            <div class="pace-labels">
+              <span id="savings-progress-label"></span>
+              <span id="savings-status" class="pace-status"></span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-card allowance">
+          <div class="allowance-row">
+            <div>
+              <div class="lbl">Income this month</div>
+              <div class="val small" id="savings-income"></div>
+            </div>
+            <div style="text-align:right">
+              <div class="lbl">Spent</div>
+              <div class="val small" id="savings-spent"></div>
+            </div>
+          </div>
+          <div class="split"></div>
+          <div class="allowance-row">
+            <div>
+              <div class="lbl">Saved</div>
+              <div class="val" id="savings-amount"></div>
+            </div>
+            <div style="text-align:right">
+              <div class="lbl">Target</div>
+              <div class="val small" id="savings-target-label"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="section-h">
         <h2>Categories</h2>
         <span class="meta">PACE MARKER = WHERE YOU SHOULD BE TODAY</span>
       </div>
@@ -166,6 +210,18 @@
         <button class="btn btn-primary" onclick="openReceiptModal()">+ New</button>
       </div>
       <div id="transactions-list"></div>
+    </section>
+
+    <!-- Income -->
+    <section id="tab-income" class="tab hidden">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Income</h1>
+          <div class="page-sub" id="income-sub"></div>
+        </div>
+        <button class="btn btn-primary" onclick="openIncomeModal()">+ Add income</button>
+      </div>
+      <div id="income-list"></div>
     </section>
 
     <!-- Budgets -->
@@ -206,6 +262,18 @@
           <div class="page-sub">Your data lives in your Google Sheet.</div>
         </div>
       </div>
+      <div class="hero-card" style="max-width:680px;margin-bottom:20px">
+        <div class="eyebrow">Savings target</div>
+        <div style="color:var(--ink-2);line-height:1.6;font-size:14px">
+          Set the share of monthly income you'd like to save. The Overview shows your actual rate against this target.
+        </div>
+        <div class="field" style="flex-direction:row;align-items:center;gap:10px;max-width:200px">
+          <input id="settings-savings-target" type="number" min="0" max="100" step="1" placeholder="20" style="flex:1;text-align:right" />
+          <span style="color:var(--ink-3);font-size:14px">%</span>
+        </div>
+        <p id="savings-target-status" class="setup-error hidden"></p>
+      </div>
+
       <div class="hero-card" style="max-width:680px">
         <div class="eyebrow">Google Sheets sync</div>
         <div style="color:var(--ink-2);line-height:1.6;font-size:14px">
