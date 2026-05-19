@@ -962,3 +962,156 @@ input.invalid {
   background-clip: padding-box;
 }
 .color-dot.active { border-color: var(--ink); box-shadow: 0 0 0 2px var(--bg); }
+
+/* ── Meals ─────────────────────────────────────────── */
+.meals-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--gap-grid);
+  margin-bottom: 28px;
+}
+.meal-card {
+  background: var(--panel);
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--cat-color, var(--accent));
+  border-radius: var(--r-lg);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.meal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.meal-name {
+  font-family: var(--font-serif);
+  font-size: 22px;
+  letter-spacing: -0.01em;
+  line-height: 1.15;
+}
+.meal-meta {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--ink-3);
+  margin-top: 4px;
+}
+.meal-cost {
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  color: var(--ink);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.meal-notes {
+  color: var(--ink-2);
+  font-size: 13px;
+  font-style: italic;
+}
+.meal-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--hairline-soft);
+  padding-top: 10px;
+}
+.meal-line {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  font-size: 13px;
+  padding: 3px 0;
+}
+.meal-line-name { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meal-line-portion { color: var(--ink-3); font-variant-numeric: tabular-nums; min-width: 40px; text-align: right; }
+.meal-line-cost { color: var(--ink-2); font-variant-numeric: tabular-nums; min-width: 56px; text-align: right; }
+.meal-empty { color: var(--ink-4); font-size: 13px; font-style: italic; padding: 4px 0; }
+.meal-actions {
+  display: flex; gap: 4px;
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--hairline-soft);
+}
+
+/* Pantry table */
+.pantry-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.pantry-table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-3);
+  padding: 12px 16px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--hairline-soft);
+}
+.pantry-table th.num, .pantry-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.pantry-table td {
+  padding: 10px 16px;
+  border-top: 1px solid var(--hairline-soft);
+  vertical-align: middle;
+}
+.pantry-table tr:first-child td { border-top: none; }
+.pantry-table .muted { color: var(--ink-3); }
+.pantry-table .pantry-date { color: var(--ink-4); }
+
+/* Pantry picker inside meal modal */
+.meal-pantry {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--panel-2);
+  margin-top: 6px;
+}
+.meal-pantry-empty {
+  padding: 24px;
+  color: var(--ink-3);
+  text-align: center;
+  font-size: 13px;
+}
+.meal-pantry-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 14px;
+  border-top: 1px solid var(--hairline-soft);
+}
+.meal-pantry-row:first-child { border-top: none; }
+.meal-pantry-info { min-width: 0; }
+.meal-pantry-name {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 14px;
+  color: var(--ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.meal-pantry-meta {
+  font-size: 12px; color: var(--ink-3);
+  margin-top: 2px;
+}
+.meal-pantry-alloc {
+  display: flex; align-items: center; gap: 8px;
+}
+.meal-pantry-alloc input[type="range"] {
+  width: 120px;
+  accent-color: var(--accent);
+}
+.meal-pantry-alloc input[type="number"] {
+  width: 56px;
+  border: 1px solid var(--hairline);
+  background: var(--panel-2);
+  border-radius: 6px;
+  padding: 5px 6px;
+  font-size: 13px;
+  text-align: right;
+  outline: none;
+}
+.meal-pantry-alloc input[type="number"]:focus { border-color: var(--accent); }
+.meal-pantry-alloc .pct-suffix { font-size: 12px; color: var(--ink-3); }

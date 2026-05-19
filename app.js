@@ -190,6 +190,7 @@ function buildNav() {
     { id: 'income',       label: 'Income',       kbd: '3' },
     { id: 'budgets',      label: 'Budgets',      kbd: '4' },
     { id: 'settings',     label: 'Settings',     kbd: '5' },
+    { id: 'meals',        label: 'Meals',        kbd: '6' },
   ];
   nav.innerHTML = '';
   items.forEach(it => {
@@ -295,6 +296,8 @@ async function apiGet() {
         categories: data.categories || [],
         income: data.income || [],
         settings: data.settings || [],
+        meals: data.meals || [],
+        meal_allocations: data.meal_allocations || [],
       };
       rebuildCategories();
       setSyncIndicator('ok', 'Synced');
@@ -363,6 +366,7 @@ function renderCurrent() {
   else if (currentPage === 'income') renderIncomePage();
   else if (currentPage === 'budgets') renderBudgetsPage();
   else if (currentPage === 'settings') renderSettingsPage();
+  else if (currentPage === 'meals') renderMealsPage();
 }
 
 // ── Hotkeys ────────────────────────────────────────────────
@@ -381,6 +385,7 @@ function bindGlobalHotkeys() {
     if (e.key === '3') showTab('income');
     if (e.key === '4') showTab('budgets');
     if (e.key === '5') showTab('settings');
+    if (e.key === '6') showTab('meals');
   });
 }
 
@@ -454,7 +459,7 @@ async function commitQuickAdd() {
 
   input.value = '';
   updateQuickbarPreview();
-  if (!cache) cache = { receipts: [], items: [], budgets: [], categories: [], income: [], settings: [] };
+  if (!cache) cache = { receipts: [], items: [], budgets: [], categories: [], income: [], settings: [], meals: [], meal_allocations: [] };
   cache.receipts.push(receipt);
   renderDashboard();
 
@@ -1769,4 +1774,500 @@ function clearToast() {
 
 function escapeAttr(s) {
   return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeHtml(s) {
+  return escapeAttr(s);
+}
+
+// ── Meals page ────────────────────────────────────────────
+
+function allocationsByItem() {
+  const map = {};
+  ((cache && cache.meal_allocations) || []).forEach(a => {
+    const p = parseFloat(a.portion);
+    if (!isFinite(p) || p <= 0) return;
+    (map[a.item_id] = map[a.item_id] || []).push(a);
+  });
+  return map;
+}
+
+function allocationsByMeal() {
+  const map = {};
+  ((cache && cache.meal_allocations) || []).forEach(a => {
+    const p = parseFloat(a.portion);
+    if (!isFinite(p) || p <= 0) return;
+    (map[a.meal_id] = map[a.meal_id] || []).push(a);
+  });
+  return map;
+}
+
+function itemTotalAllocated(itemId, excludeMealId) {
+  return ((cache && cache.meal_allocations) || []).reduce((s, a) => {
+    if (a.item_id !== itemId) return s;
+    if (excludeMealId && a.meal_id === excludeMealId) return s;
+    const p = parseFloat(a.portion);
+    return isFinite(p) && p > 0 ? s + p : s;
+  }, 0);
+}
+
+function itemById(id) {
+  return ((cache && cache.items) || []).find(i => i.id === id) || null;
+}
+
+function receiptById(id) {
+  return ((cache && cache.receipts) || []).find(r => r.id === id) || null;
+}
+
+function itemLabel(it) {
+  const desc = (it.description || '').trim();
+  if (desc) return desc;
+  const r = receiptById(it.receipt_id);
+  return (r && r.store) ? `${r.store} item` : 'Unnamed item';
+}
+
+function itemUnitCost(it) {
+  const tot = parseFloat(it.total_price);
+  if (isFinite(tot) && tot > 0) return tot;
+  const q = parseFloat(it.quantity);
+  const u = parseFloat(it.unit_price);
+  if (isFinite(q) && isFinite(u) && q > 0 && u > 0) return q * u;
+  return 0;
+}
+
+function renderMealsPage() {
+  if (!cache) return;
+  const meals = (cache.meals || []).slice().sort((a, b) =>
+    String(b.date || '').localeCompare(String(a.date || ''))
+  );
+  const sub = document.getElementById('meals-sub');
+  if (sub) sub.textContent = meals.length === 0
+    ? 'Plan meals from the food items in your receipts.'
+    : `${meals.length} planned · ${(cache.meal_allocations || []).length} ingredient allocations`;
+
+  renderMealsList(meals);
+  renderPantry();
+}
+
+function renderMealsList(meals) {
+  const list = document.getElementById('meals-list');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (meals.length === 0) {
+    list.innerHTML = `
+      <div class="recent">
+        <div class="recent-empty">
+          <div class="ttl">No meals planned yet.</div>
+          <div>Click "+ Plan a meal" to compose one from your pantry.</div>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const byMeal = allocationsByMeal();
+  const wrap = document.createElement('div');
+  wrap.className = 'meals-grid';
+  meals.forEach(m => {
+    const allocs = byMeal[m.id] || [];
+    let mealCost = 0;
+    const lines = allocs.map(a => {
+      const it = itemById(a.item_id);
+      const portion = parseFloat(a.portion);
+      const cost = it ? itemUnitCost(it) * portion : 0;
+      mealCost += cost;
+      const label = it ? itemLabel(it) : '(missing item)';
+      return `
+        <div class="meal-line">
+          <span class="meal-line-name">${escapeHtml(label)}</span>
+          <span class="meal-line-portion">${Math.round(portion * 100)}%</span>
+          <span class="meal-line-cost">${cost > 0 ? fmt(cost) : '—'}</span>
+        </div>`;
+    }).join('');
+
+    const cat = categoryById(m.category || 'beta_meal');
+    const d = m.date ? new Date(m.date + 'T00:00:00') : null;
+    const dateLabel = d ? d.toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric' }) : '';
+
+    const card = document.createElement('div');
+    card.className = 'meal-card';
+    card.style.setProperty('--cat-color', cat.color);
+    card.innerHTML = `
+      <div class="meal-head">
+        <div>
+          <div class="meal-name">${escapeHtml(m.name || 'Untitled meal')}</div>
+          <div class="meal-meta">
+            <span class="cat-dot" style="background:${cat.color}"></span>
+            <span>${escapeHtml(cat.name)}</span>
+            ${dateLabel ? `<span>·</span><span>${dateLabel}</span>` : ''}
+          </div>
+        </div>
+        <div class="meal-cost">${mealCost > 0 ? fmt(mealCost) : '—'}</div>
+      </div>
+      ${m.notes ? `<div class="meal-notes">${escapeHtml(m.notes)}</div>` : ''}
+      <div class="meal-lines">${lines || '<div class="meal-empty">No ingredients allocated yet.</div>'}</div>
+      <div class="meal-actions">
+        <button class="btn btn-ghost btn-sm" data-act="edit" data-id="${m.id}">Edit</button>
+        <button class="btn btn-ghost btn-sm" data-act="delete" data-id="${m.id}">Delete</button>
+      </div>
+    `;
+    card.querySelector('[data-act="edit"]').addEventListener('click', () => openMealModal(m));
+    card.querySelector('[data-act="delete"]').addEventListener('click', () => deleteMeal(m));
+    wrap.appendChild(card);
+  });
+  list.appendChild(wrap);
+}
+
+function renderPantry() {
+  const container = document.getElementById('pantry-list');
+  if (!container) return;
+  const search = (document.getElementById('pantry-search')?.value || '').toLowerCase();
+  const availableOnly = document.getElementById('pantry-available-only')?.checked || false;
+
+  const items = ((cache && cache.items) || []).slice();
+  const byItem = allocationsByItem();
+
+  let rows = items.map(it => {
+    const allocated = (byItem[it.id] || []).reduce((s, a) => s + parseFloat(a.portion || 0), 0);
+    const remaining = Math.max(0, 1 - allocated);
+    return { it, allocated, remaining };
+  });
+
+  if (search) {
+    rows = rows.filter(r => {
+      const l = itemLabel(r.it).toLowerCase();
+      return l.includes(search);
+    });
+  }
+  if (availableOnly) rows = rows.filter(r => r.remaining > 0.001);
+
+  rows.sort((a, b) => {
+    if (b.remaining !== a.remaining) return b.remaining - a.remaining;
+    return itemLabel(a.it).localeCompare(itemLabel(b.it));
+  });
+
+  const meta = document.getElementById('pantry-meta');
+  if (meta) meta.textContent = `${rows.length} ITEM${rows.length === 1 ? '' : 'S'}`;
+
+  if (rows.length === 0) {
+    container.innerHTML = `<div class="recent-empty" style="padding:32px 24px">
+      <div>No food items match.</div>
+      <div style="font-size:13px;margin-top:4px">Add line items to a receipt to populate your pantry.</div>
+    </div>`;
+    return;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'pantry-table';
+  table.innerHTML = `
+    <thead><tr>
+      <th>Item</th>
+      <th>From</th>
+      <th>Category</th>
+      <th class="num">Cost</th>
+      <th class="num">Allocated</th>
+      <th class="num">Remaining</th>
+    </tr></thead>
+    <tbody></tbody>
+  `;
+  const tbody = table.querySelector('tbody');
+  rows.forEach(({ it, allocated, remaining }) => {
+    const r = receiptById(it.receipt_id);
+    const cat = categoryById(it.category || (r && r.category) || 'other');
+    const cost = itemUnitCost(it);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${escapeHtml(itemLabel(it))}</td>
+      <td class="muted">${r ? escapeHtml(r.store || '—') : '—'}<span class="pantry-date">${r && r.date ? ' · ' + r.date : ''}</span></td>
+      <td><span class="cat-dot" style="background:${cat.color}"></span> ${escapeHtml(cat.name)}</td>
+      <td class="num">${cost > 0 ? fmt(cost) : '—'}</td>
+      <td class="num">${Math.round(allocated * 100)}%</td>
+      <td class="num"><strong>${Math.round(remaining * 100)}%</strong></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  container.innerHTML = '';
+  container.appendChild(table);
+
+  const searchInput = document.getElementById('pantry-search');
+  const availInput = document.getElementById('pantry-available-only');
+  if (searchInput && searchInput.dataset.bound !== '1') {
+    searchInput.dataset.bound = '1';
+    searchInput.addEventListener('input', renderPantry);
+  }
+  if (availInput && availInput.dataset.bound !== '1') {
+    availInput.dataset.bound = '1';
+    availInput.addEventListener('change', renderPantry);
+  }
+}
+
+// ── Meal modal ────────────────────────────────────────────
+
+function openMealModal(existing) {
+  const editing = !!existing;
+  const meal = existing || {
+    id: uid(),
+    name: '',
+    date: todayISO(),
+    notes: '',
+    category: 'beta_meal',
+  };
+
+  const catChips = categories.map(c =>
+    `<button type="button" class="cat-chip${c.id === (meal.category || 'beta_meal') ? ' active' : ''}" data-cat="${c.id}">
+       <span class="cat-dot" style="background:${c.color}"></span>${escapeHtml(c.name)}
+     </button>`
+  ).join('');
+
+  const card = openModal(`
+    <h3>${editing ? 'Edit meal' : 'Plan a meal'}</h3>
+    <div class="modal-sub">${editing ? 'Adjust details or re-allocate ingredients from your pantry.' : 'Name it, then pick ingredients from your pantry and allocate a portion of each.'}</div>
+    <div class="modal-fields">
+      <div class="field">
+        <label>Name</label>
+        <input id="mm-name" type="text" value="${escapeAttr(meal.name)}" placeholder="Tuesday stir-fry" />
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+        <div class="field">
+          <label>Date</label>
+          <input id="mm-date" type="date" value="${meal.date || todayISO()}" />
+        </div>
+        <div class="field">
+          <label>Notes</label>
+          <input id="mm-notes" type="text" value="${escapeAttr(meal.notes)}" placeholder="Optional" />
+        </div>
+      </div>
+      <div class="field">
+        <label>Category</label>
+        <div class="cat-chips" id="mm-cats">${catChips}</div>
+      </div>
+      <div class="field">
+        <label>Ingredients <span style="text-transform:none;letter-spacing:0;color:var(--ink-4)">— pick from pantry, allocate %</span></label>
+        <input id="mm-search" type="text" placeholder="Search food items in your pantry…" autocomplete="off" style="border:1px solid var(--hairline);background:var(--panel-2);border-radius:8px;padding:8px 12px;font-size:14px" />
+        <div id="mm-pantry" class="meal-pantry"></div>
+      </div>
+      <p id="mm-error" class="setup-error hidden"></p>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="mm-save">${editing ? 'Save meal' : 'Add meal'}</button>
+    </div>
+  `);
+
+  card.dataset.editing = editing ? '1' : '';
+  card.dataset.id = meal.id;
+  card.dataset.category = meal.category || 'beta_meal';
+
+  const existingAllocs = ((cache && cache.meal_allocations) || [])
+    .filter(a => a.meal_id === meal.id);
+  card.__allocations = {};
+  card.__allocIds = {};
+  existingAllocs.forEach(a => {
+    const p = parseFloat(a.portion);
+    if (isFinite(p) && p > 0) {
+      card.__allocations[a.item_id] = p;
+      card.__allocIds[a.item_id] = a.id;
+    }
+  });
+
+  card.querySelectorAll('#mm-cats .cat-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      card.querySelectorAll('#mm-cats .cat-chip').forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      card.dataset.category = chip.dataset.cat;
+    });
+  });
+
+  const searchInput = document.getElementById('mm-search');
+  searchInput.addEventListener('input', () => renderMealPantry(card, searchInput.value));
+  renderMealPantry(card, '');
+
+  document.getElementById('mm-save').addEventListener('click', () => commitMealModal(card));
+  setTimeout(() => document.getElementById('mm-name').focus(), 0);
+}
+
+function renderMealPantry(card, search) {
+  const container = card.querySelector('#mm-pantry');
+  const mealId = card.dataset.id;
+  const items = ((cache && cache.items) || []).slice();
+  const q = (search || '').toLowerCase();
+
+  const rows = items.map(it => {
+    const otherAllocated = itemTotalAllocated(it.id, mealId);
+    const remainingForOthers = Math.max(0, 1 - otherAllocated);
+    const thisMealCurrent = card.__allocations[it.id] || 0;
+    const maxForThis = Math.min(1, remainingForOthers + thisMealCurrent);
+    return { it, otherAllocated, maxForThis, thisMealCurrent };
+  }).filter(r => {
+    if (q) return itemLabel(r.it).toLowerCase().includes(q);
+    return true;
+  });
+
+  rows.sort((a, b) => {
+    if ((b.thisMealCurrent > 0) !== (a.thisMealCurrent > 0)) return (b.thisMealCurrent > 0 ? 1 : 0) - (a.thisMealCurrent > 0 ? 1 : 0);
+    if (b.maxForThis !== a.maxForThis) return b.maxForThis - a.maxForThis;
+    return itemLabel(a.it).localeCompare(itemLabel(b.it));
+  });
+
+  if (rows.length === 0) {
+    container.innerHTML = `<div class="meal-pantry-empty">No food items match. Add line items to a receipt first.</div>`;
+    return;
+  }
+
+  container.innerHTML = '';
+  rows.slice(0, 80).forEach(({ it, maxForThis, thisMealCurrent, otherAllocated }) => {
+    const r = receiptById(it.receipt_id);
+    const cat = categoryById(it.category || (r && r.category) || 'other');
+    const cost = itemUnitCost(it);
+    const row = document.createElement('div');
+    row.className = 'meal-pantry-row';
+    row.innerHTML = `
+      <div class="meal-pantry-info">
+        <div class="meal-pantry-name">
+          <span class="cat-dot" style="background:${cat.color}"></span>
+          ${escapeHtml(itemLabel(it))}
+        </div>
+        <div class="meal-pantry-meta">${r ? escapeHtml(r.store || '') : ''}${cost > 0 ? ' · ' + fmt(cost) : ''} · ${Math.round(maxForThis * 100)}% available</div>
+      </div>
+      <div class="meal-pantry-alloc">
+        <input type="range" min="0" max="100" step="5" value="${Math.round(thisMealCurrent * 100)}" data-item="${it.id}" data-max="${Math.round(maxForThis * 100)}" />
+        <input type="number" min="0" max="${Math.round(maxForThis * 100)}" step="1" value="${Math.round(thisMealCurrent * 100)}" data-itemnum="${it.id}" />
+        <span class="pct-suffix">%</span>
+      </div>
+    `;
+    const slider = row.querySelector('input[type="range"]');
+    const num = row.querySelector('input[type="number"]');
+
+    function applyValue(v, source) {
+      let val = parseFloat(v);
+      if (!isFinite(val) || val < 0) val = 0;
+      const max = parseFloat(slider.dataset.max);
+      if (val > max) val = max;
+      const portion = val / 100;
+      if (portion > 0) card.__allocations[it.id] = portion;
+      else delete card.__allocations[it.id];
+      if (source !== 'range') slider.value = String(val);
+      if (source !== 'num') num.value = String(val);
+    }
+    slider.addEventListener('input', () => applyValue(slider.value, 'range'));
+    num.addEventListener('input', () => applyValue(num.value, 'num'));
+
+    container.appendChild(row);
+  });
+}
+
+async function commitMealModal(card) {
+  const editing = card.dataset.editing === '1';
+  const id = card.dataset.id;
+  const name = document.getElementById('mm-name').value.trim();
+  const date = document.getElementById('mm-date').value;
+  const notes = document.getElementById('mm-notes').value.trim();
+  const category = card.dataset.category || 'beta_meal';
+  const err = document.getElementById('mm-error');
+  err.classList.add('hidden');
+
+  if (!name || !date) {
+    err.textContent = 'Please give the meal a name and date.';
+    err.classList.remove('hidden');
+    return;
+  }
+
+  const meal = {
+    id,
+    name,
+    date,
+    notes,
+    category,
+    uploaded_at: new Date().toISOString(),
+  };
+
+  const desiredAllocs = card.__allocations || {};
+  const existingIds = card.__allocIds || {};
+
+  const allocOps = [];
+  Object.keys(desiredAllocs).forEach(itemId => {
+    const portion = desiredAllocs[itemId];
+    if (!(portion > 0)) return;
+    const allocId = existingIds[itemId] || uid();
+    allocOps.push({ kind: 'set', allocation: { id: allocId, meal_id: id, item_id: itemId, portion, notes: '' } });
+  });
+  Object.keys(existingIds).forEach(itemId => {
+    if (!desiredAllocs[itemId]) {
+      allocOps.push({ kind: 'delete', id: existingIds[itemId] });
+    }
+  });
+
+  const btn = document.getElementById('mm-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  try {
+    if (editing) {
+      const updates = { name, date, notes, category };
+      await apiPost({ action: 'update_meal', id, updates });
+      const m = cache.meals.find(x => x.id === id);
+      if (m) Object.assign(m, updates);
+    } else {
+      await apiPost({ action: 'add_meal', meal });
+      if (!cache.meals) cache.meals = [];
+      cache.meals.push(meal);
+    }
+
+    if (!cache.meal_allocations) cache.meal_allocations = [];
+    for (const op of allocOps) {
+      if (op.kind === 'set') {
+        await apiPost({ action: 'set_meal_allocation', allocation: op.allocation });
+        const idx = cache.meal_allocations.findIndex(a => a.id === op.allocation.id);
+        if (idx >= 0) cache.meal_allocations[idx] = op.allocation;
+        else cache.meal_allocations.push(op.allocation);
+      } else if (op.kind === 'delete') {
+        await apiPost({ action: 'delete_meal_allocation', id: op.id });
+        cache.meal_allocations = cache.meal_allocations.filter(a => a.id !== op.id);
+      }
+    }
+
+    showToast(`${editing ? 'Updated' : 'Added'} meal · ${name}`);
+    closeModal();
+    renderCurrent();
+  } catch (e) {
+    err.textContent = 'Save failed: ' + e.message;
+    err.classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = editing ? 'Save meal' : 'Add meal';
+  }
+}
+
+async function deleteMeal(meal) {
+  if (!confirm(`Delete "${meal.name || 'this meal'}" and free its allocated portions?`)) return;
+  const removedMeal = meal;
+  const removedAllocs = ((cache && cache.meal_allocations) || []).filter(a => a.meal_id === meal.id);
+  cache.meals = (cache.meals || []).filter(m => m.id !== meal.id);
+  cache.meal_allocations = (cache.meal_allocations || []).filter(a => a.meal_id !== meal.id);
+  renderCurrent();
+  try {
+    await apiPost({ action: 'delete_meal', id: meal.id });
+    showToast(`Removed meal · ${removedMeal.name}`, {
+      undo: async () => {
+        cache.meals.push(removedMeal);
+        cache.meal_allocations.push(...removedAllocs);
+        renderCurrent();
+        try {
+          await apiPost({ action: 'add_meal', meal: removedMeal });
+          for (const a of removedAllocs) {
+            await apiPost({ action: 'set_meal_allocation', allocation: a });
+          }
+        } catch (e) {
+          showToast('Undo failed: ' + e.message, { error: true });
+          refreshData();
+        }
+      }
+    });
+  } catch (e) {
+    cache.meals.push(removedMeal);
+    cache.meal_allocations.push(...removedAllocs);
+    renderCurrent();
+    showToast('Delete failed: ' + e.message, { error: true });
+  }
 }

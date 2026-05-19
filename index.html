@@ -254,6 +254,33 @@
       </div>
     </section>
 
+    <!-- Meals -->
+    <section id="tab-meals" class="tab hidden">
+      <div class="page-header">
+        <div>
+          <h1 class="page-title">Meals</h1>
+          <div class="page-sub" id="meals-sub"></div>
+        </div>
+        <button class="btn btn-primary" onclick="openMealModal()">+ Plan a meal</button>
+      </div>
+
+      <div id="meals-list"></div>
+
+      <div class="section-h">
+        <h2>Pantry</h2>
+        <span class="meta" id="pantry-meta">EVERY FOOD ITEM FROM YOUR RECEIPTS</span>
+      </div>
+      <div class="hero-card" style="padding:0;overflow:hidden">
+        <div style="padding:16px 20px 12px;display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--hairline-soft)">
+          <input id="pantry-search" type="text" placeholder="Search food items…" autocomplete="off" style="flex:1;border:1px solid var(--hairline);background:var(--panel-2);border-radius:8px;padding:8px 12px;font-size:14px" />
+          <label style="display:flex;gap:6px;align-items:center;font-size:13px;color:var(--ink-3)">
+            <input type="checkbox" id="pantry-available-only" /> Only with portion left
+          </label>
+        </div>
+        <div id="pantry-list"></div>
+      </div>
+    </section>
+
     <!-- Settings -->
     <section id="tab-settings" class="tab hidden">
       <div class="page-header">

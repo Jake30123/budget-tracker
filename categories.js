@@ -36,6 +36,12 @@ const CATEGORIES = [
     keywords: ["cinema", "movie", "theater", "concert", "ticket", "amc", "regal", "bowling", "arcade", "museum", "zoo", "bookstore", "barnes", "spotify", "netflix", "hulu", "steam"]
   },
   {
+    id: "beta_meal",
+    name: "Beta Meal",
+    color: "#5a8a6a",
+    keywords: []
+  },
+  {
     id: "other",
     name: "Other",
     color: "#7a786e",

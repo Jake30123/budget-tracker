@@ -16,6 +16,8 @@ const BUDGET_HEADERS = ['category_id', 'amount'];
 const CATEGORY_HEADERS = ['id', 'name', 'color'];
 const INCOME_HEADERS = ['id', 'date', 'source', 'amount', 'uploaded_at'];
 const SETTING_HEADERS = ['key', 'value'];
+const MEAL_HEADERS = ['id', 'name', 'date', 'notes', 'category', 'uploaded_at'];
+const MEAL_ALLOC_HEADERS = ['id', 'meal_id', 'item_id', 'portion', 'notes'];
 
 function getSheet(name, headers) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -57,7 +59,55 @@ function readAll() {
     categories: sheetToObjects(getSheet('Categories', CATEGORY_HEADERS), CATEGORY_HEADERS),
     income: sheetToObjects(getSheet('Income', INCOME_HEADERS), INCOME_HEADERS),
     settings: sheetToObjects(getSheet('Settings', SETTING_HEADERS), SETTING_HEADERS, 'key'),
+    meals: sheetToObjects(getSheet('Meals', MEAL_HEADERS), MEAL_HEADERS),
+    meal_allocations: sheetToObjects(getSheet('MealAllocations', MEAL_ALLOC_HEADERS), MEAL_ALLOC_HEADERS),
   };
+}
+
+function appendMeal(meal) {
+  const sh = getSheet('Meals', MEAL_HEADERS);
+  sh.appendRow(MEAL_HEADERS.map(h => meal[h] != null ? meal[h] : ''));
+}
+
+function deleteMealCascade(mealId) {
+  const mealsSheet = getSheet('Meals', MEAL_HEADERS);
+  const mRow = findRow(mealsSheet, MEAL_HEADERS.indexOf('id'), mealId);
+  if (mRow > 0) mealsSheet.deleteRow(mRow);
+
+  const allocSheet = getSheet('MealAllocations', MEAL_ALLOC_HEADERS);
+  const lastRow = allocSheet.getLastRow();
+  if (lastRow < 2) return;
+  const mealCol = MEAL_ALLOC_HEADERS.indexOf('meal_id') + 1;
+  const refs = allocSheet.getRange(2, mealCol, lastRow - 1, 1).getValues();
+  for (let i = refs.length - 1; i >= 0; i--) {
+    if (refs[i][0] === mealId) allocSheet.deleteRow(i + 2);
+  }
+}
+
+function setMealAllocation(allocation) {
+  const sh = getSheet('MealAllocations', MEAL_ALLOC_HEADERS);
+  const portion = Number(allocation.portion);
+  if (!allocation.id || !allocation.meal_id || !allocation.item_id) {
+    throw new Error('Allocation requires id, meal_id, item_id');
+  }
+  const row = findRow(sh, MEAL_ALLOC_HEADERS.indexOf('id'), allocation.id);
+  if (!isFinite(portion) || portion <= 0) {
+    if (row > 0) sh.deleteRow(row);
+    return;
+  }
+  if (row > 0) {
+    MEAL_ALLOC_HEADERS.forEach((h, i) => {
+      sh.getRange(row, i + 1).setValue(allocation[h] != null ? allocation[h] : '');
+    });
+  } else {
+    sh.appendRow(MEAL_ALLOC_HEADERS.map(h => allocation[h] != null ? allocation[h] : ''));
+  }
+}
+
+function deleteMealAllocation(id) {
+  const sh = getSheet('MealAllocations', MEAL_ALLOC_HEADERS);
+  const row = findRow(sh, MEAL_ALLOC_HEADERS.indexOf('id'), id);
+  if (row > 0) sh.deleteRow(row);
 }
 
 function appendIncome(entry) {
@@ -249,6 +299,21 @@ function doPost(e) {
         return json({ ok: true });
       case 'set_setting':
         setSetting(body.key, body.value);
+        return json({ ok: true });
+      case 'add_meal':
+        appendMeal(body.meal);
+        return json({ ok: true });
+      case 'update_meal':
+        updateRow('Meals', MEAL_HEADERS, body.id, body.updates || {});
+        return json({ ok: true });
+      case 'delete_meal':
+        deleteMealCascade(body.id);
+        return json({ ok: true });
+      case 'set_meal_allocation':
+        setMealAllocation(body.allocation);
+        return json({ ok: true });
+      case 'delete_meal_allocation':
+        deleteMealAllocation(body.id);
         return json({ ok: true });
       default:
         return json({ error: 'Unknown action: ' + body.action });
